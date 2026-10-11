@@ -1,0 +1,17 @@
+quest "Ghost Patrols" version 1
+order as-written
+terrain (2, 2, 3)
+
+at 1.5s:
+    burst alien.fast at edge("east", outside=128) copies 2
+
+# Five-alien rings patrol in from alternating sides.
+repeat 12 as i:
+    at 2.5s + i * 2.5s:
+        spawn template.formation_ring_alien_5_19 at edge(["west", "east"][i % 2], outside=128)
+
+# as-written: this straggler is listed after the last patrol, so an early clear brings that patrol first.
+at 27.5s:
+    spawn alien.fast at edge("west", outside=264)
+at 37.5s:
+    spawn template.formation_grid_alien_bronze_18 at edge("west", outside=128)

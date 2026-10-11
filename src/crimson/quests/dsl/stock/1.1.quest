@@ -1,0 +1,10 @@
+quest "Land Hostile" version 1
+
+at 500ms:
+    spawn alien.small_gray at edge("south")
+at 2.5s:
+    burst alien.small_gray at corner("southwest") copies 2
+at 6.5s:
+    burst alien.small_gray at corner("northwest") copies 3
+at 11.5s:
+    burst alien.small_gray at corner("northeast") copies 4

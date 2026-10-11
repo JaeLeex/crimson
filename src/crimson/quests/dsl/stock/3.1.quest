@@ -1,0 +1,24 @@
+quest "The Blighting" version 1
+terrain (4, 5, 4)
+
+at 1.5s:
+    burst alien.fast at edge("east", outside=128) copies 2
+    burst alien.fast at edge("west", outside=128) copies 2
+at 2s:
+    place nest.alien on [point(896, 128), point(128, 128), point(128, 896), point(896, 896)]
+
+# Twelve-strong waves rotate around the edges, 16s apart. The fifth wave has no edge,
+# so its fast aliens come just a second before the next one.
+let sides = ["east", "west", "south", "north"]
+var cue = 4s
+repeat 8 as wave:
+    let edge_wave = wave % 5 < 4
+    at cue:
+        if wave in [2, 4]:
+            burst alien.fast at edge("west", outside=128) copies 4
+        if wave in [3, 5]:
+            burst alien.fast at edge("east", outside=128) copies 4
+        if edge_wave:
+            let breed = template.ai1_alien_blue_tint_1a if wave % 2 == 0 else template.ai1_lizard_blue_tint_1c
+            burst breed at edge(sides[wave % 5]) copies 12
+    cue += 16s if edge_wave else 1s

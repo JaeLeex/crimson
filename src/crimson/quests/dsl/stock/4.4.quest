@@ -1,0 +1,11 @@
+quest "The Collaboration" version 1
+terrain (6, 7, 6)
+
+# Every breed at once, one per side, growing by four for every five waves.
+repeat 16 as wave:
+    let size = 7 + wave * 4 // 5
+    at 1.5s + wave * 11s:
+        burst template.ai1_alien_blue_tint_1a at edge("east") copies size
+        burst template.ai1_spider_sp1_blue_tint_1b at edge("south") copies size
+        burst template.ai1_lizard_blue_tint_1c at edge("west") copies size
+        burst zombie.random at edge("north") copies size

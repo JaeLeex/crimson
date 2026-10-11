@@ -1,0 +1,13 @@
+quest "Lizard Kings" version 1
+terrain (4, 5, 4)
+
+at 1.5s:
+    spawn formation.lizard_chain at edge("east", outside=128)
+    spawn formation.lizard_chain at edge("west", outside=128)
+    spawn formation.lizard_chain at edge("east", outside=128, fraction=0.875)
+
+# Lizards step around the centre in 20-degree turns, more than once round, one every 0.9s.
+repeat 28 as i:
+    let angle = i * 20deg
+    at 1.5s + i * 900ms:
+        spawn template.lizard_random_31 at polar(center, 256, angle) heading -angle

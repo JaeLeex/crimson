@@ -1,0 +1,14 @@
+quest "The Random Factor" version 1
+order as-written
+terrain (0, 0, 1)
+
+# Mixed aliens from both sides; roughly one wave in five brings big aliens from the south.
+repeat 10 as wave:
+    let cue = 1.5s + wave * 10s
+    at cue:
+        burst template.alien_random_1d at edge("east") copies players * 2 + 4
+    at cue + 200ms:
+        burst template.alien_random_1d at edge("west") copies 6
+    if rand() % 5 == 3:
+        at cue:
+            burst template.alien_big_gray_29 at edge("south") copies players

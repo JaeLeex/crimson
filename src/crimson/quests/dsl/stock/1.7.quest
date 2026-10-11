@@ -1,0 +1,6 @@
+quest "Spider Wave Syndrome" version 1
+terrain (0, 0, 1)
+
+repeat 18 as wave:
+    at 1.5s + wave * 5.5s:
+        burst spider.small_blue at edge("west") copies players * 2 + 6

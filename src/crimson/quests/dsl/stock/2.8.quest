@@ -1,0 +1,7 @@
+quest "Land Of Lizards" version 1
+terrain (2, 2, 3)
+
+let spots = [point(256, 256), point(768, 256), point(256, 768), point(768, 768)]
+repeat 4 as i:
+    at 2s + i * 10s:
+        spawn template.alien_spawner_ring_24_0e at spots[i]

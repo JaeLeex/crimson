@@ -1,0 +1,18 @@
+quest "Alien Squads" version 1
+terrain (0, 0, 1)
+
+# Alien rings close in from beyond the edges, then a crossfire from opposite corners.
+let squads = [
+    ((-256, 256), 1.5s), ((-256, 768), 2.5s), ((768, -256), 5.5s), ((768, 1280), 8.5s),
+    ((1280, 1280), 14.5s), ((1280, 768), 18.5s), ((-256, 256), 25s), ((-256, 768), 30s),
+]
+for (pos, time) in squads:
+    at time:
+        spawn formation.alien_ring at pos
+
+repeat 26 as i:
+    let cue = 36.2s + i * 1.8s
+    at cue - 400ms:
+        spawn alien.small_gray at corner("northwest")
+    at cue:
+        spawn alien.small_gray at corner("southeast")

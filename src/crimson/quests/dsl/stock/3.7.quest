@@ -1,0 +1,14 @@
+quest "Spiders Inc." version 1
+weapon plasma_minigun
+terrain (4, 4, 5)
+
+at 500ms:
+    spawn template.spider_sp1_stop_and_go_38 at edge("south")
+    spawn template.spider_sp1_stop_and_go_38 at (576, 1088)
+    burst spider.small_blue at edge("north") copies 4
+
+# Stop-and-go spiders pinch from north and south, one more every second wave.
+repeat 15 as wave:
+    at 17s + wave * 6s:
+        burst template.spider_sp1_stop_and_go_38 at edge("south") copies wave // 2 + 3
+        burst template.spider_sp1_stop_and_go_38 at edge("north") copies wave // 2 + 3

@@ -1,0 +1,11 @@
+quest "Syntax Terror" version 1
+terrain (6, 6, 7)
+
+# Four volleys of alien nests, 30s apart, scattered by fixed arithmetic rather than chance.
+let count = players + (4 if hardcore else 0) + 9
+repeat 4 as volley:
+    repeat count as i:
+        let x = ((76 * i * i + 236) * i + (5321 + 53 * volley) * volley) % 896 + 64
+        let y = ((1221 + 21 * i) * i + (76 * volley * volley + 27) * volley) % 896 + 64
+        at 1.5s + volley * 30s + i * 300ms:
+            spawn nest.alien at (x, y)

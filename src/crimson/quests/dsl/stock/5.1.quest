@@ -1,0 +1,24 @@
+quest "The Beating" version 1
+order as-written
+terrain (1, 1, 3)
+
+# Each flank opens with three big aliens, then a column of green men marches in, 100ms apart.
+pattern flank(side, start):
+    at start:
+        burst template.alien_big_gray_29 at edge(side, outside=32) copies 3
+    repeat 8 as i:
+        at start + 2s + i * 100ms:
+            burst template.alien_small_green_man_25 at edge(side, outside=64 + i * 32) copies 8
+
+at 500ms:
+    spawn template.alien_bonus_carrier_27 at (256, 256)
+flank("east", 8s)
+flank("west", 18s)
+
+# as-written: the ring columns queue behind all the ghosts, so clearing early only pulls ghosts forward.
+repeat 6 as i:
+    at 40s + i * 100ms:
+        burst template.alien_ghost_0f at edge("north", outside=64 + i * 42) copies 4
+repeat 6 as i:
+    at 40s + i * 100ms:
+        burst formation.alien_ring at edge("south", outside=44 + i * 32) copies 2

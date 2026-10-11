@@ -1,0 +1,13 @@
+quest "8-legged Terror" version 1
+terrain (0, 0, 1)
+
+at 1s:
+    spawn spider.boss at (768, 512)
+
+# Spiders pour from all four corners; the western pair grows with the party.
+repeat 14 as wave:
+    at 6s + wave * 2.2s:
+        burst template.spider_sp1_random_3d at corner("northwest", outside=25) copies players
+        spawn template.spider_sp1_random_3d at corner("northeast", outside=25)
+        burst template.spider_sp1_random_3d at corner("southwest", outside=25) copies players
+        spawn template.spider_sp1_random_3d at corner("southeast", outside=25)

@@ -1,0 +1,31 @@
+quest "Nagolipoli" version 1
+terrain (1, 1, 3)
+
+# Two rings of spiders around the centre, each turned along its spoke.
+repeat 8 as i:
+    at 2s:
+        spawn spider.small_blue at polar(center, 128, i * 45deg) heading i * 45deg
+repeat 12 as i:
+    at 8s:
+        spawn spider.small_blue at polar(center, 178, i * 30deg) heading i * 30deg
+
+# Thirty-two waves of lizards from every corner, 0.8s apart, one more every eight waves.
+let corner_turns = [("northwest", 60deg), ("northeast", -60deg), ("southwest", -60deg), ("southeast", 225deg)]
+repeat 32 as wave:
+    at 13s + wave * 800ms:
+        for (name, turn) in corner_turns:
+            burst template.ai1_lizard_blue_tint_1c at corner(name) copies wave // 8 + 1 heading turn
+
+# Spider nests line both sides, plasma nests guard the middle, and a last pincer closes north and south.
+repeat 6 as i:
+    at 49.6s + i * 100ms:
+        spawn nest.spider at (64, 256 + i * 256 / 3)
+repeat 6 as i:
+    at 50.6s + i * 100ms:
+        spawn nest.spider at (960, 256 + i * 256 / 3)
+at 53.6s:
+    spawn nest.plasma at (512, 256) heading 180deg
+    spawn nest.plasma at (512, 768) heading 180deg
+at 54.1s:
+    burst template.ai1_lizard_blue_tint_1c at edge("south") copies 8 heading 225deg
+    burst template.ai1_lizard_blue_tint_1c at edge("north") copies 8 heading 225deg

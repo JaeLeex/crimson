@@ -1,0 +1,8 @@
+quest "The Massacre" version 1
+terrain (6, 7, 6)
+
+repeat 18 as wave:
+    at 1.5s + wave * 5s:
+        burst zombie.random at edge("east") copies wave + 3
+        if wave % 2 == 0:
+            burst alien.fast at edge("east", outside=128) copies wave + 1

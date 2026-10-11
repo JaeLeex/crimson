@@ -1,0 +1,13 @@
+quest "The Annihilation" version 1
+terrain (6, 6, 7)
+
+at 500ms:
+    burst alien.fast at (128, 512) copies 2
+
+# A zigzag column of alien nests down the east side; much later, the same column zigzags the other way.
+repeat 12 as i:
+    at 500ms + i * 500ms:
+        spawn nest.alien at (832 if i % 2 == 0 else 896, 128 + i * 64)
+repeat 12 as i:
+    at 45s + i * 300ms:
+        spawn nest.alien at (896 if i % 2 == 0 else 832, 128 + i * 64)

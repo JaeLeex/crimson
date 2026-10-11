@@ -1,0 +1,23 @@
+quest "Gauntlet" version 1
+order as-written
+terrain (6, 6, 7)
+
+let size = players + (4 if hardcore else 0)
+
+var cue = 0
+for pos in ring(center, 158, size + 9):
+    at cue:
+        spawn nest.spider at pos
+    cue += 200ms
+
+repeat size + 9 as wave:
+    at 4s + wave * 5.5s:
+        for side in ["east", "west", "south", "north"]:
+            burst zombie.random at edge(side) copies wave + 2
+
+# as-written: the outer ring queues behind every zombie wave, so clearing early brings zombies forward, not nests.
+cue = 42.5s
+for pos in ring(center, 258, size + 17):
+    at cue:
+        spawn nest.spider at pos
+    cue += 500ms

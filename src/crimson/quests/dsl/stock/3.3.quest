@@ -1,0 +1,16 @@
+quest "The Killing" version 1
+terrain (4, 5, 4)
+
+# The original rolls a random enemy and side each wave, then ignores both: the rotation is fixed.
+let enemies = [template.ai1_alien_blue_tint_1a, template.ai1_spider_sp1_blue_tint_1b, template.ai1_lizard_blue_tint_1c]
+let sides = ["east", "west", "south", "north"]
+repeat 10 as wave:
+    let cue = 2s + wave * 6s
+    if wave % 5 < 4:
+        at cue:
+            burst enemies[wave % 3] at edge(sides[wave % 5]) copies 12
+    else:
+        # Every fifth wave drops three alien nests at random spots instead, a second apart.
+        repeat 3 as i:
+            at cue + i * 1s:
+                burst nest.alien at (rand_int(128, 895), rand_int(128, 895)) copies 3

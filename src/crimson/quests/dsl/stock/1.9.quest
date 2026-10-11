@@ -1,0 +1,28 @@
+quest "Nesting Grounds" version 1
+terrain (0, 0, 1)
+
+let south = edge("south")
+at 1.5s:
+    burst template.alien_random_1d at south copies players * 2 + 6
+at 8s:
+    spawn template.den_alien_weak_small_09 at (256, 256)
+at 13s:
+    spawn template.den_alien_weak_small_09 at center
+at 18s:
+    spawn template.den_alien_weak_small_09 at (768, 768)
+at 25s:
+    burst template.alien_random_1d at south copies players * 2 + 6
+at 39s:
+    burst template.alien_random_1d at south copies players * 3 + 3
+at 41.1s:
+    spawn template.den_alien_weak_small_09 at (384, 512)
+at 42.1s:
+    spawn template.den_alien_weak_small_09 at (640, 512)
+at 43.1s:
+    spawn template.den_alien_weak_small_09 at (512, 640)
+at 44.1s:
+    spawn nest.alien_slow at center
+at 50s:
+    burst template.alien_random_1e at south copies players * 2 + 5
+at 55s:
+    burst template.alien_random_1f at south copies players * 2 + 2

@@ -1,0 +1,12 @@
+quest "The Lizquidation" version 1
+order as-written
+terrain (4, 4, 5)
+
+repeat 10 as wave:
+    at 1.5s + wave * 8s:
+        burst template.lizard_random_2e at edge("east") copies wave + 6
+        burst template.lizard_random_2e at edge("west") copies wave + 6
+    if wave == 4:
+        # as-written: listed with the fifth wave but due at 1.5s, so it lands a frame after the first.
+        at 1.5s:
+            burst alien.fast at edge("east", outside=128) copies 2

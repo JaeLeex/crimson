@@ -1,0 +1,12 @@
+quest "Lizard Zombie Pact" version 1
+terrain (6, 7, 6)
+
+repeat 16 as wave:
+    at 1.5s + wave * 7s:
+        burst zombie.random at edge("east") copies 6
+        burst zombie.random at edge("west") copies 6
+        if wave % 5 == 0:
+            # Every fifth wave adds a stronger pair of lizard dens, further down the west side.
+            let pair = wave // 5
+            burst template.den_lizard_weak_0c at (356, 256 + pair * 180) copies pair + 1
+            burst template.den_lizard_weak_0c at (356, 384 + pair * 180) copies pair + 2

@@ -1,0 +1,14 @@
+quest "Everred Pastures" version 1
+terrain (2, 3, 2)
+
+# Four spider breeds from four sides, one more each wave; blue spiders join the fourth wave.
+repeat 8 as i:
+    let size = i + 1
+    at 1.5s + i * 13s:
+        burst template.spider_sp1_random_32 at edge("east") copies size
+        burst template.spider_sp1_random_red_33 at edge("west") copies size
+        burst template.spider_sp1_random_green_34 at edge("south") copies size
+        burst template.spider_sp2_random_35 at edge("north") copies size
+        if size == 4:
+            burst template.ai1_spider_sp1_blue_tint_1b at edge("north") copies 8
+            burst template.ai1_spider_sp1_blue_tint_1b at edge("south") copies 8

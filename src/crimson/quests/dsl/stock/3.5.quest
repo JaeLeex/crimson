@@ -1,0 +1,14 @@
+quest "Surrounded By Reptiles" version 1
+terrain (4, 5, 4)
+
+# Lizard nests fill two columns, then two rows, boxing in the centre.
+repeat 5 as i:
+    let along = 256 + i * 102.4
+    at 1s + i * 800ms:
+        spawn template.den_lizard_weak_slower_0d at (256, along)
+        spawn template.den_lizard_weak_slower_0d at (768, along)
+repeat 5 as i:
+    let along = 256 + i * 102.4
+    at 8s + i * 800ms:
+        spawn template.den_lizard_weak_slower_0d at (along, 256)
+        spawn template.den_lizard_weak_slower_0d at (along, 768)

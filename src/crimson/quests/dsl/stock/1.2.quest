@@ -1,0 +1,18 @@
+quest "Minor Alien Breach" version 1
+order as-written
+
+at 1s:
+    burst alien.small_gray at (256, 256) copies 2
+at 1.7s:
+    burst alien.small_gray at (256, 128) copies 2
+
+# A steady stream from the east; flanking lanes open as it goes on.
+repeat 16 as wave:
+    at wave * 3.6s:
+        spawn alien.small_gray at edge("east")
+        if wave >= 5:
+            spawn alien.small_gray at edge("east", fraction=0.25)
+        if wave == 11:
+            spawn template.alien_big_gray_29 at edge("south")
+        if wave >= 9:
+            spawn alien.small_gray at edge("west", fraction=0.75)

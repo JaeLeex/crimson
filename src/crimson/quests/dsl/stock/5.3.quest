@@ -1,0 +1,19 @@
+quest "The Fortress" version 1
+terrain (3, 1, 3)
+
+at 100ms:
+    burst spider.small_blue at edge("west", outside=50) copies 6
+
+# A wall of weak alien dens, then a block of spider nests built column by column,
+# leaving a two-nest gap in the row nearest the centre.
+repeat 7 as i:
+    at 1.1s + i * 600ms:
+        spawn template.den_alien_weak_small_09 at (768, 320 + i * 64)
+
+var cue = 10.3s
+repeat 6 as column:
+    repeat 6 as row:
+        if not (row == 0 and column in [2, 3]):
+            at cue:
+                spawn nest.spider at (320 + column * 64, 448 - row * 64)
+            cue += 600ms

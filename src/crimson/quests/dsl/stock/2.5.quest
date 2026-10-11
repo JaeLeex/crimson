@@ -1,0 +1,13 @@
+quest "Sweep Stakes" version 1
+weapon gauss_gun
+terrain (2, 3, 2)
+
+# Sixteen spokes of four aliens at random angles, each facing the centre; the gaps shrink.
+var cue = 2s
+repeat 16 as i:
+    let angle = rand() % 612 * 0.01
+    for radius in range(84, 252, 42):
+        let pos = polar(center, radius, angle)
+        at cue:
+            spawn template.alien_delayed_start_36 at pos heading facing(pos, center)
+    cue += 2s - i * 80ms

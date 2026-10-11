@@ -1,0 +1,30 @@
+quest "The End of All" version 1
+order as-written
+terrain (6, 6, 7)
+
+pattern nest_trail(points, start, gap):
+    var cue = start
+    for pos in points:
+        at cue:
+            spawn nest.alien at pos
+        cue += gap
+
+pattern shooter_pairs(start):
+    repeat 4 as i:
+        at start + i * 1s:
+            burst spider.plasma at edge(["west", "east"][i % 2], outside=128, fraction=0.25 + i * 0.125) copies 2
+
+let posts = [point(128, 128), point(896, 128), point(128, 896), point(896, 896)]
+repeat 4 as i:
+    at 3s + i * 3s:
+        spawn spider.plasma at posts[i]
+
+nest_trail(ring(center, 80, 6), 13s, 300ms)
+at 14.8s:
+    spawn nest.plasma at center
+shooter_pairs(18s)
+nest_trail(ring(center, 80, 6, start=30deg), 43s, 300ms)
+# as-written: in hardcore the outer ring queues ahead of the last shooters, so early clears bring the ring first.
+if hardcore:
+    nest_trail(ring(center, 180, 12, start=30deg), 62.8s, 500ms)
+shooter_pairs(48s)

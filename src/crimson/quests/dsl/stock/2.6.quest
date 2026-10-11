@@ -1,0 +1,7 @@
+quest "Evil Zombies At Large" version 1
+terrain (2, 2, 3)
+
+repeat 10 as wave:
+    at 1.5s + wave * 5.5s:
+        for side in ["east", "west", "south", "north"]:
+            burst zombie.random at edge(side) copies wave + 4

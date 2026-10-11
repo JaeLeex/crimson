@@ -1,0 +1,15 @@
+quest "Spideroids" version 1
+terrain (2, 2, 3)
+
+at 1s:
+    spawn spider.splitter at edge("east")
+at 3s:
+    spawn spider.splitter at edge("west")
+at 6s:
+    spawn spider.splitter at edge("east", fraction=0.25)
+at 9s:
+    if hardcore:
+        spawn spider.splitter at (1088, 762)
+        spawn spider.splitter at edge("south")
+    if players >= 2 or hardcore:
+        spawn spider.splitter at (-64, 762)

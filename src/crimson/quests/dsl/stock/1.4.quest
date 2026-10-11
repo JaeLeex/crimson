@@ -1,0 +1,15 @@
+quest "Frontline Assault" version 1
+
+# The southern front speeds up; the northern corners join in, and two big aliens flank wave 8.
+var gap = 2.5s
+repeat 20 as wave:
+    at (wave + 2) * gap - 5s:
+        spawn (template.ai1_alien_blue_tint_1a if 3 <= wave < 8 else alien.small_gray) at edge("south")
+        if wave >= 3:
+            spawn alien.small_gray at corner("northwest")
+        if wave >= 9:
+            spawn alien.small_gray at corner("northeast")
+        if wave == 8:
+            spawn template.alien_big_gray_29 at edge("east")
+            spawn template.alien_big_gray_29 at edge("west")
+    gap = max(gap - 50ms, 1.8s)

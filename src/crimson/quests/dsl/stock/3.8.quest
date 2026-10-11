@@ -1,0 +1,12 @@
+quest "Lizard Raze" version 1
+order as-written
+terrain (4, 4, 5)
+
+repeat 15 as wave:
+    at 1.5s + wave * 6s:
+        burst template.lizard_random_2e at edge("east") copies 6
+        burst template.lizard_random_2e at edge("west") copies 6
+
+# as-written: the dens queue behind every wave, so clearing early brings lizard waves forward first.
+at 10s:
+    place template.den_lizard_weak_0c on line(point(128, 256), point(0, 128), 3)

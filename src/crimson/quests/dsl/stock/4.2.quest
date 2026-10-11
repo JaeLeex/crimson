@@ -1,0 +1,7 @@
+quest "Zombie Time" version 1
+terrain (6, 7, 6)
+
+repeat 12 as wave:
+    at 1.5s + wave * 8s:
+        burst zombie.random at edge("east") copies 8
+        burst zombie.random at edge("west") copies 8
