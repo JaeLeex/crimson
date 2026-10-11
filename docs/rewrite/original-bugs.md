@@ -583,7 +583,7 @@ Rewrite behavior:
   so fixed-step catch-up retains it; it is not a press edge or a configurable
   bonus action. Python enforces the policy in the firing routine.
 
-Evidence: `tools/match/evidence/player-fire-bullets-shortcut-2026-09-11/README.md`
+Evidence: [player-fire-bullets-shortcut-2026-09-11](https://github.com/banteg/crimson/blob/8407308af2dcb1c1c15352f39f76b0cbfea900f3/tools/match/evidence/player-fire-bullets-shortcut-2026-09-11/README.md)
 and the [Fire Bullets version comparison](../re/static/fire-bullets-1.9.8-vs-1.9.93.md).
 
 ## 25) Re-picking a bonus can leave its HUD indicator hidden for seconds
@@ -964,13 +964,14 @@ Rewrite behavior:
   draws, and a type 3 among them keeps the slot's 0x80 flag. The 54-minute
   bot run on the board verifies 2.5 times faster.
 - Python uses the same update-local cursor through `CreaturePool.alloc_slot`.
-  Successful allocations still update generation and allocation/spawn counters;
-  failed allocations still execute the complete spawn body against the phantom.
+  Successful allocations still update generation and allocation/spawn counters.
+  Within a Survival wave batch, a failed allocation takes only its random draws
+  when a later spawn will overwrite the phantom; standalone spawns write it whole.
 
 Evidence: the recovered `survival_update`, `survival_spawn_creature` and
 `creature_alloc_slot` bodies, and
 [`spawn_batch.py`](../../crimson-core/checks/spawn_batch.py), which executes
 those late-game cases in the original x86 executable and compares optimized
 batches against unoptimized recovered bodies. The
-[profile and validation notes](../verification/survival-spawn-profile.md)
-describe the measurements and remaining costs.
+[optimization notes](https://github.com/banteg/crimson/blob/master/crimson-core/optimizations/README.md)
+describe how to measure them.

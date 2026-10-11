@@ -78,18 +78,14 @@ PRUNED_DIRECTORIES = frozenset(
 AUDIT_ROOTS = ("analysis", "crimson-core", "crimson-re", "decomp", "docs", "scripts", "src", "tests", "third_party/headers", "tools")
 # Generated outputs and dated history: names there are as of when they were written.
 HISTORY_PATHS = (
-    "analysis/archive",
     "analysis/binary_ninja",
     "analysis/decomp",
-    "analysis/frida",
     "analysis/ghidra/raw",
     "analysis/historical",
     "analysis/ida",
     "analysis/native",
-    "analysis/reviews",
     "crimson-core/results",
     "tools/match/c2",
-    "tools/match/evidence",
 )
 _DATED_RECORD_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
@@ -105,7 +101,7 @@ def _live(relative: str) -> bool:
         return False
     if relative.startswith("tools/match/scratches/"):
         return relative.endswith("/scratch.conf")
-    # Dated reports such as tools/match/EXACT-MATCHES-2026-09-07.md.
+    # Dated reports such as tools/match/PLAUSIBILITY-AUDIT-2026-09-25.md.
     return _DATED_RECORD_RE.search(Path(relative).name) is None
 
 
