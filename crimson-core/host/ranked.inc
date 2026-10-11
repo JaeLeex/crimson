@@ -11,6 +11,7 @@
 #include <dirent.h>
 #include <string>
 #include <time.h>
+#include <unistd.h>
 
 static bool ranked_enabled; // the host takes runs to the leaderboard (game_leaderboard_enable)
 extern "C" bool ranked_checked; // the Ranked box, which a launch starts unticked (play_game_menu_update)
@@ -94,11 +95,18 @@ static void ranked_release() {
   mkdir("leaderboard", 0755);
   mkdir("leaderboard/outbox", 0755);
   std::string path = "leaderboard/outbox/" + hex(digest, 32) + ".json";
-  if (FILE *fp = platform_fopen(path.c_str(), "wb")) {
-    fwrite(entry.data(), 1, entry.size(), fp);
-    fclose(fp);
+  // The native uploader runs on another thread: publish only a whole entry.
+  // The web host also keeps a failed write out of its upload pass.
+  std::string temp = path + ".part";
+  if (FILE *fp = platform_fopen(temp.c_str(), "wb")) {
+    bool written = fwrite(entry.data(), 1, entry.size(), fp) == entry.size();
+    if (fclose(fp)) written = false;
+    if (!written || rename(temp.c_str(), path.c_str())) {
+      unlink(temp.c_str());
+      return;
+    }
+    host_leaderboard(HOST_LEADERBOARD_UPLOAD);
   }
-  host_leaderboard(HOST_LEADERBOARD_UPLOAD);
 }
 
 // Runs waiting in the outbox, for the Profile tip.
@@ -106,7 +114,10 @@ static int ranked_waiting() {
   int count = 0;
   if (DIR *dir = opendir("leaderboard/outbox")) {
     while (dirent *entry = readdir(dir))
-      count += strstr(entry->d_name, ".json") != nullptr;
+      {
+        size_t n = strlen(entry->d_name);
+        count += n > 5 && !strcmp(entry->d_name + n - 5, ".json");
+      }
     closedir(dir);
   }
   return count;
