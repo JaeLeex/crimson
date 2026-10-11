@@ -21,6 +21,7 @@ from ..perks.selection import perk_selection_prepared_choices
 from ..persistence.highscores import UNI_NUM_MASK, HighScoreRecord
 from ..persistence.save_status import GameStatus
 from ..quests import quest_by_level
+from ..quests.custom import CustomQuest
 from ..quests.level import QuestLevel
 from ..quests.types import QuestDefinition
 from ..replay import ReplayRecorder
@@ -46,11 +47,13 @@ _DEBUG_WEAPON_IDS = tuple(sorted(WEAPON_BY_ID))
 
 class QuestRunOutcome(msgspec.Struct, frozen=True):
     kind: str  # "completed" | "failed"
-    level: QuestLevel
+    # The stock level, or None for a custom quest.
+    level: QuestLevel | None
     base_time_ms: int
     player_health_values: tuple[float, ...]
     pending_perk_count: int
     record: HighScoreRecord
+    custom_quest: CustomQuest | None = None
 
 
 class QuestMode(BaseGameplayMode):
@@ -63,6 +66,8 @@ class QuestMode(BaseGameplayMode):
         audio: AudioState | None = None,
         audio_rng: Crand,
     ) -> None:
+        # The base class asks whether runs rank while it sets up.
+        self._custom_quest: CustomQuest | None = None
         super().__init__(
             ctx,
             default_game_mode_id=GameMode.QUESTS,
@@ -111,13 +116,28 @@ class QuestMode(BaseGameplayMode):
         if quest is None:
             self._quest_def = None
             self._quest_level = level
+            self._custom_quest = None
             self._quest_highscore_random_tag = 0
             self._world_runtime.end_session()
             return
+        self._start(status=status, quest_level=quest.level)
+
+    def select_custom_quest(self, quest: CustomQuest | None) -> None:
+        """The custom quest the next run plays, or None for a stock level: known before the screen opens, whose
+        world reset already takes its seed and player count from whether the run ranks."""
+        self._custom_quest = quest
+
+    def start_custom_run(self, quest: CustomQuest, *, status: GameStatus) -> None:
+        self._start(status=status, custom_quest=quest)
+
+    def _start(self, *, status: GameStatus, quest_level: QuestLevel | None = None, custom_quest: CustomQuest | None = None) -> None:
         self._outcome = None
         self._replay_recorder = None
         self._replay_checkpoints.clear()
         self._replay_checkpoints_last_tick = None
+        # Set before the seed and player count: whether the run ranks decides both.
+        self._quest_level = quest_level
+        self._custom_quest = custom_quest
 
         hardcore_flag = self.config.gameplay.hardcore
 
@@ -129,14 +149,17 @@ class QuestMode(BaseGameplayMode):
         self.world_runtime.reset(seed=seed, player_count=max(1, min(4, player_count)))
         self._local_input.reset(players=self.world.players)
         self.bind_status(status)
-        prepared = self._initialize_run(GameMode.QUESTS, quest_level=quest.level)
+        prepared = self._initialize_run(GameMode.QUESTS, quest_level=quest_level, custom_quest=custom_quest)
         spawn_state = prepared.session.mode_state
         assert isinstance(spawn_state, QuestSpawnState)
         self._quest_spawn_state = spawn_state
         self._quest_highscore_random_tag = prepared.quest_highscore_random_tag & UNI_NUM_MASK
         self._quest_def = prepared.quest
-        self._quest_level = quest.level
         self._reset_gameplay_frame_clock()
+
+    def _ranked_attempt(self) -> bool:
+        # Only the original's quests rank: the verifier cannot start a custom one.
+        return self._custom_quest is None and super()._ranked_attempt()
 
     def _handle_input(self) -> None:
         if debug_enabled() and (not self._perk_menu.open):
@@ -185,11 +208,12 @@ class QuestMode(BaseGameplayMode):
 
     def _close_run(self, kind: str) -> None:
         if self._outcome is None:
-            assert self._quest_level is not None, "quest outcome requires active quest level"
+            assert self._quest_level is not None or self._custom_quest is not None, "a quest outcome needs its quest"
             base_time_ms = int(self._quest_spawn_state.spawn_timeline_ms)
             self._outcome = QuestRunOutcome(
                 kind=kind,
                 level=self._quest_level,
+                custom_quest=self._custom_quest,
                 base_time_ms=base_time_ms,
                 player_health_values=tuple(float(player.health) for player in self.world.players),
                 pending_perk_count=int(self.state.perk_selection.pending_count),
@@ -285,13 +309,21 @@ class QuestMode(BaseGameplayMode):
 
     def _draw_quest_title(self) -> None:
         font = self._grim_mono
-        quest = self._quest_def
-        if font is None or quest is None:
+        if font is None:
+            return
+        quest, custom = self._quest_def, self._custom_quest
+        if quest is not None:
+            title, number, subtitle = quest.title, quest.level.text, ""
+        elif custom is not None:
+            # A custom quest has no stock number; its author's byline goes under the title.
+            title, number, subtitle = custom.title, "", custom.byline
+        else:
             return
         draw_quest_title_timer_overlay(
             font,
-            quest.title,
-            quest.level.text,
+            title,
+            number,
+            subtitle=subtitle,
             timer_ms=float(self._quest_spawn_state.stage_banner_timer_ms),
         )
 
