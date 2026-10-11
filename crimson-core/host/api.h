@@ -33,6 +33,9 @@ uintptr_t portable_input();
 uintptr_t portable_output();
 uintptr_t portable_commands();
 int portable_step_many(uint32_t command_count);
+// Human-readable reason for the last step, empty after a successful step. Copy before stepping again;
+// wording is not a machine-readable contract. Initialization failures are not diagnosed here.
+uintptr_t portable_refusal();
 int portable_init(uint32_t seed, int mode, int quest_major, int quest_minor);
 int portable_step(int command, int argument);
 int portable_snapshot();
