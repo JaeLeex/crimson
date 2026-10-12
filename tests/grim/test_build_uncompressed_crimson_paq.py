@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
 from grim import paq as grim_paq
 from grim.assets import _select_texture_asset
+from scripts import build_uncompressed_crimson_paq as builder
 from scripts.build_uncompressed_crimson_paq import (
     _alpha_stats,
     _hybrid_rects,
+    _hybrid_replacement,
     _replacement_differs_visibly,
     build_uncompressed_crimson_paq,
 )
@@ -92,3 +96,57 @@ def test_visible_guard_flags_large_content_changes() -> None:
     replacement.putpixel((1, 0), (255, 255, 0, 255))
 
     assert _replacement_differs_visibly(original, replacement)
+
+
+def test_hybrid_copies_rgba_including_soft_alpha_and_transparent_pixels(mocker, tmp_path: Path) -> None:
+    original = Image.new("RGBA", (256, 256), (10, 20, 30, 128))
+    source = Image.new("RGBA", original.size, (30, 40, 50, 128))
+    source.putpixel((0, 0), (99, 88, 77, 0))
+    # A missing source sprite retains the release exactly, including its soft alpha.
+    missing = _hybrid_rects("ui/ui_wicons.jaz", original.size)[30].bbox
+    source.paste((0, 0, 0, 0), missing)
+    path = tmp_path / "ui_wicons.tga"
+    source.save(path)
+    mocker.patch.object(builder, "_decode_original_image", return_value=original)
+    result = _hybrid_replacement("ui/ui_wicons.jaz", b"original", path)
+    assert result is not None
+    output = Image.open(io.BytesIO(result.payload)).convert("RGBA")
+    assert output.getpixel((0, 0)) == (99, 88, 77, 0)
+    assert output.getpixel((1, 0)) == (30, 40, 50, 128)
+    assert output.crop(missing).tobytes() == original.crop(missing).tobytes()
+
+
+@pytest.mark.parametrize("stem", ["bonuses", "projs"])
+def test_complete_arcade_sheets_keep_source_payload(mocker, tmp_path: Path, stem: str) -> None:
+    original = Image.new("RGBA", (128, 128), (10, 20, 30, 128))
+    source = Image.new("RGBA", original.size, (30, 40, 50, 128))
+    source_root = tmp_path / "source"
+    (source_root / "game").mkdir(parents=True)
+    path = source_root / "game" / f"{stem}.tga"
+    source.save(path)
+    mocker.patch.object(builder, "_decode_original_image", return_value=original)
+    base, output = tmp_path / "base.paq", tmp_path / "out.paq"
+    grim_paq.write_paq(base, [(f"game\\{stem}.jaz", b"original")])
+    stats = build_uncompressed_crimson_paq(source_root, base, output)
+    assert stats.hybrid == 0
+    assert grim_paq.read_paq(output) == [(f"game/{stem}.tga", path.read_bytes())]
+
+
+def test_weapon_sheet_remaps_shrinkifier_and_keeps_three_release_slots(mocker, tmp_path: Path) -> None:
+    original = Image.new("RGBA", (256, 256), (10, 20, 30, 128))
+    source = Image.new("RGBA", original.size, (30, 40, 50, 128))
+    cells = _hybrid_rects("ui/ui_wicons.jaz", original.size)
+    source.paste((40, 50, 60, 128), cells[25].bbox)
+    path = tmp_path / "ui_wicons.tga"
+    source.save(path)
+    mocker.patch.object(builder, "_decode_original_image", return_value=original)
+    result = _hybrid_replacement("ui/ui_wicons.jaz", b"original", path)
+    assert result is not None
+    output = Image.open(io.BytesIO(result.payload)).convert("RGBA")
+    for index, cell in enumerate(cells):
+        expected = (
+            original.crop(cell.bbox)
+            if index in {25, 30, 31}
+            else source.crop(cells[25].bbox if index == 23 else cell.bbox)
+        )
+        assert output.crop(cell.bbox).tobytes() == expected.tobytes(), index
