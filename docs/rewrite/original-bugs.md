@@ -984,3 +984,49 @@ those late-game cases in the original x86 executable and compares optimized
 batches against unoptimized recovered bodies. The
 [optimization notes](https://github.com/banteg/crimson/blob/master/crimson-core/optimizations/README.md)
 describe how to measure them.
+
+## 38) Quest difficulty leaks into Survival and the Tutorial
+
+Native behavior:
+
+- `config_blob.hardcore` is a saved setting, ticked from the quest list. It is
+  cleared only while quest 4.10 is unbeaten, by `game_frame_update`
+  (`0x0040c1c0`), in the demo build, and by the quest list and high-score
+  screens under the same condition. Starting another mode leaves it set.
+- `quest_fail_retry_count` counts a failed quest's **Play Again** presses.
+  The quest failed screen's other buttons, the quest results screen and
+  hardcore spawns clear it. Quitting a retried quest from the pause menu
+  leaves it set.
+- `creature_spawn_template` (`0x00430af0`) reads both for every creature it
+  builds. Survival's milestone waves (`survival_update`, `0x00407cd0`) and
+  the Tutorial's creatures (`tutorial_timeline_update`, `0x00408990`) come
+  from the same templates, so they get either the hardcore buffs (20% more
+  health after their maximum is set, 5% more speed, 40% more contact damage,
+  nests 0.2 s faster, the stop-and-go yellow spiders at 70% speed) or the
+  retry easing (down to half health and contact damage, 60% speed, 80% XP,
+  nests up to 3 s slower), in most formations only on the last member.
+- Survival's regular spawns read neither.
+
+Why it's likely a bug:
+
+- Both are quest settings: the Hardcore box sits on the quest list, quests
+  keep separate hardcore progress and score tables, and quest builders add
+  their own hardcore extras. The retry easing answers a failed quest, and
+  the failed screen's own buttons clear it.
+- Survival keeps a single score table, `survival.hi`, so tougher, easier and
+  normal runs rank against each other. `highscore_record_init` marks the
+  record as hardcore, but nothing reads that marker outside quests.
+
+Rewrite behavior:
+
+- Default: Hardcore and the retry easing apply to quests only. Replays still
+  record the saved box and the retry count, as the original's runs carry
+  them.
+- `--preserve-bugs`: both also apply to Survival and the Tutorial, as native.
+
+Evidence: `decomp/1.9/crimsonland/quests/creature_spawn_template.cpp` (the
+hardcore and retry reads after the spawn switch), `game/game_frame_update.cpp`
+(the hardcore clears), `end_screens/quest_failed_screen_update.cpp` and
+`end_screens/quest_results_screen_update.cpp` (the retry count),
+`game/survival_update.cpp`, `game/tutorial_timeline_update.cpp` and
+`highscore/highscore_record_init.c`.
