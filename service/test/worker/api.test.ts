@@ -164,12 +164,13 @@ describe("runs", () => {
     const html = await (await SELF.fetch(`${ORIGIN}/runs/${id}`)).text();
     expect(html).toMatch(/<meta property="og:description" content="banteg survived \d+:\d\d for [\d,]+ xp, #1 on the board\. [\d,]+ kills/);
     expect(html).toContain(`<meta property="og:image" content="${ORIGIN}/runs/${id}.png">`);
-    expect(html).toContain('<meta name="twitter:card" content="summary_large_image">');
+    expect(html).toContain('<meta name="twitter:card" content="player">');
+    expect(html).toContain(`<meta name="twitter:player" content="${ORIGIN}/play/?watch=${id}">`);
 
     const card = await SELF.fetch(`${ORIGIN}/runs/${id}.png`);
     expect(card.headers.get("content-type")).toBe("image/png");
     const header = new DataView(await card.arrayBuffer());
-    expect([header.getUint32(16), header.getUint32(20)]).toEqual([1200, 630]);
+    expect([header.getUint32(16), header.getUint32(20)]).toEqual([1200, 900]);
     expect((await SELF.fetch(`${ORIGIN}/runs/${"0".repeat(64)}.png`)).status).toBe(404);
   });
 
