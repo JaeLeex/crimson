@@ -1,8 +1,13 @@
 // Audio output. The module mixes its DirectSound buffers (game_audio); an SDL
-// stream plays the mix, kept a few frames deep. The mix never falls more than a
-// quarter second behind the wall clock: with no output device, or one that
-// stops draining (a failure, the browser's autoplay lock), the surplus is
-// dropped (game_audio_skip moves the voices on unmixed), so the game's play
+// stream plays the mix, kept a few frames deep. Mixing follows elapsed time,
+// not device refills: a browser drains whole buffers, and filling each hole
+// in one pull would snap every new sound to those buffer boundaries.
+// The mix runs one queue depth ahead of the wall clock. A frame that comes
+// later than that skips the gap and refills only the depth. With no output
+// device, or one that stops draining (a failure, the browser's autoplay lock),
+// the queue stays bounded and the rest is dropped; once such a device drains
+// again, its stale queue goes and the depth refills from the current mix.
+// Skipped audio still moves the voices on (game_audio_skip), so the game's play
 // cursors and voice status move as they would with sound. CRIMSON_MUTE silences
 // the device only: the game mixes and the device drains as they would aloud.
 #include "client.h"
@@ -13,13 +18,16 @@
 namespace {
 // The module's mix: 16-bit stereo at 44.1 kHz, at most 4096 frames a pull.
 constexpr int RATE = 44100, CHANNELS = 2, FRAME_BYTES = CHANNELS * 2, PULL = 4096, LAG = RATE / 4;
+// Clock steering: a sample per this many elapsed frames (0.2%), at any frame rate.
+constexpr int STEER = 512;
 SDL_AudioStream *stream;
 // Frames kept queued: about four 60 Hz frames, and at least two of the device's
 // buffers, which it drains whole.
 Sint64 depth = RATE / 15;
-// The wall clock, in mixed frames: a draining device resets it to the mix.
+// The wall clock, with the initial queue depth ahead of it.
 Uint64 anchor;
-Sint64 mixed, last_queued;
+Uint64 last_drain;
+Sint64 mixed, last_queued, correction;
 } // namespace
 
 void audio_init() {
@@ -39,22 +47,46 @@ void audio_init() {
 void audio_update(w2c_game *game) {
   Uint64 now = SDL_GetTicksNS();
   Sint64 queued = stream ? SDL_GetAudioStreamQueued(stream) / FRAME_BYTES : 0;
-  // The first pull, or a device keeping up within the slack: the wall clock is
-  // where the mix is, which absorbs the device's drift but keeps a stall's debt.
-  Sint64 due = anchor ? (Sint64)((now - anchor) * RATE / SDL_NS_PER_SECOND) : 0;
-  if (!anchor || (stream && (queued < last_queued || queued < depth) && due - mixed <= LAG)) {
-    anchor = now - (Uint64)mixed * SDL_NS_PER_SECOND / RATE;
-    due = mixed;
+  if (!anchor)
+    anchor = now;
+  Sint64 due = depth + (Sint64)((now - anchor) * RATE / SDL_NS_PER_SECOND) + correction;
+  // The device starts out draining; a quarter second without a drain is a stall.
+  bool draining = now - (last_drain ? last_drain : anchor) < SDL_NS_PER_SECOND / 4;
+  if (stream && queued < last_queued) {
+    // A device draining again after a stall (the browser's autoplay lock
+    // lifting) drops its stale queue and starts over at the normal depth.
+    if (!draining) {
+      SDL_ClearAudioStream(stream);
+      queued = 0;
+      if (Sint64 refill = depth - (due - mixed); refill > 0) {
+        correction += refill;
+        due += refill;
+      }
+    }
+    last_drain = now;
+    draining = true;
   }
-  Sint64 room = stream ? depth - queued : 0;
+  // Device and wall clocks can drift. Outside a whole buffer of slack, nudge
+  // by a few samples, never by a refill-sized block. A stalled device must
+  // keep advancing unheard, so it does not steer this clock.
+  if (last_drain && draining && due - mixed <= LAG) {
+    Sint64 projected = queued + due - mixed, step = 1 + (due - mixed) / STEER;
+    Sint64 adjust = projected < depth ? step : projected > depth * 3 / 2 ? -SDL_min(step, due - mixed) : 0;
+    correction += adjust;
+    due += adjust;
+  }
+  // Leave room for the device's chunked consumption, but bound a locked or
+  // failed device's queue. Its unplayed surplus still advances the voices.
+  Sint64 room = stream ? SDL_max((Sint64)0, depth + LAG - queued) : 0;
   // What no one will hear is skipped, not mixed: a long stall costs one call.
-  for (Sint64 unheard = due - mixed - LAG - room; unheard > 0;) {
+  // Refill only the normal depth afterwards, without adding lasting latency.
+  for (Sint64 unheard = due - mixed - SDL_min(depth, (Sint64)LAG); unheard > 0;) {
     Sint64 skip = SDL_min(unheard, (Sint64)INT32_MAX);
     w2c_game_game_audio_skip(game, (u32)skip);
     mixed += skip;
     unheard -= skip;
   }
-  for (Sint64 frames = SDL_max(room, due - mixed - LAG); frames > 0;) {
+  for (Sint64 frames = due - mixed; frames > 0;) {
     int pull = (int)SDL_min(frames, (Sint64)PULL);
     const void *mix = client_memory() + w2c_game_game_audio(game, pull);
     int played = (int)SDL_clamp(room, (Sint64)0, (Sint64)pull);
