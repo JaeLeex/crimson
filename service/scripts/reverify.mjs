@@ -10,13 +10,15 @@
 // are listed, with SQL to retire them for a migration. Each run that verifies also gets
 // its ground baked (src/ground.ts) into .reverify/grounds/, from the built site's art
 // (dist/ui), for `npm run grounds` to put in production once the build is deployed.
+// Runs verify on one worker thread per CPU (reverify-worker.mjs).
 import { execFile, execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createServer } from "vite";
+import { availableParallelism } from "node:os";
 import { promisify } from "node:util";
 import { downloadReplays } from "./reverify-cache.mjs";
+import { verifyRuns } from "./reverify-pool.mjs";
 
 const SERVICE = fileURLToPath(new URL("..", import.meta.url));
 const CORE = join(SERVICE, "../crimson-core/build/wasm/core.wasm");
@@ -49,43 +51,17 @@ async function storedRuns(dir) {
 if (!existsSync(CORE)) throw Error(`build the core first: uv run python crimson-core/build.py --target wasm (${CORE})`);
 if (!existsSync(join(ART, "ui"))) throw Error(`build the site first: npm run assets && npm run build (${ART})`);
 const runs = await storedRuns(process.argv[2]);
-// The service's own modules, with the worker's wasm imports as the compiled modules it binds.
-const vite = await createServer({
-  configFile: false,
-  root: SERVICE,
-  logLevel: "error",
-  server: { middlewareMode: true, hmr: false },
-  appType: "custom",
-  plugins: [
-    {
-      name: "wasm-modules",
-      enforce: "pre",
-      load: (id) =>
-        id.endsWith(".wasm")
-          ? `import { readFileSync } from "node:fs"; export default new WebAssembly.Module(readFileSync(${JSON.stringify(id)}));`
-          : null,
-    },
-  ],
-});
-const { decodeReplay, inflateReplay } = await vite.ssrLoadModule("/src/replay.ts");
-const { encodeTransport } = await vite.ssrLoadModule("/src/transport.ts");
-const { verifyWithGround } = await vite.ssrLoadModule("/src/runs.ts");
-// The worker's site files, as its ASSETS binding serves them.
-const env = { ASSETS: { fetch: async (url) => new Response(readFileSync(join(ART, new URL(url).pathname))) } };
 rmSync(GROUNDS, { recursive: true, force: true });
 mkdirSync(GROUNDS, { recursive: true });
 
 const started = performance.now();
-const failed = [];
-for (const { id, file } of runs) {
-  const replay = decodeReplay(inflateReplay(new Uint8Array(readFileSync(file))));
-  const start = performance.now();
-  const { verdict, ground } = await verifyWithGround(env, "https://crimson.land", replay, encodeTransport(replay));
-  if (!verdict.ok) failed.push({ id, reason: verdict.reason });
-  else writeFileSync(join(GROUNDS, `${id}.jpg`), ground);
-  console.log(`${id}  ${verdict.ok ? "ok" : verdict.reason}  ${((performance.now() - start) / 1000).toFixed(2)}s (${replay.ticks.length} ticks)`);
-}
-await vite.close();
+const results = await verifyRuns(runs, {
+  jobs: availableParallelism(),
+  workerData: { service: SERVICE, art: ART, grounds: GROUNDS },
+  onResult: ({ id, ok, reason, seconds, ticks }) =>
+    console.log(`${id}  ${ok ? "ok" : reason}  ${seconds.toFixed(2)}s (${ticks} ticks)`),
+});
+const failed = results.filter(({ ok }) => !ok);
 console.log(`\n${runs.length - failed.length} of ${runs.length} runs verify in ${((performance.now() - started) / 1000).toFixed(2)}s; their grounds are in ${GROUNDS}.`);
 if (failed.length) {
   console.log("To retire the rest (write each reason for players):");

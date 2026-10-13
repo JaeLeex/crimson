@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { downloadReplays } from "./reverify-cache.mjs";
+import { verifyRuns } from "./reverify-pool.mjs";
 import { putGrounds } from "./grounds.mjs";
 import { replayInputs, replayPlan } from "./deploy-replays.mjs";
 import { requireArtifacts, requireGreenChecks, requireTrustedRun, resolveRuntimeBuild, REQUIRED_CHECKS } from "./deploy-preflight.mjs";
@@ -14,6 +15,40 @@ const sha = "a".repeat(40);
 const run = { head_repository: { full_name: "banteg/crimson" }, head_branch: "master", head_sha: sha, path: ".github/workflows/core.yml", event: "push", status: "completed", conclusion: "success" };
 const checks = REQUIRED_CHECKS.map((name, id) => ({ id, name, app: { slug: "github-actions" }, status: "completed", conclusion: "success" }));
 const artifacts = ["runtime-wasm", "crimsonland-web"].map((name, index) => ({ id: index + 1, name, expired: false, size_in_bytes: 100, workflow_run: { head_sha: sha } }));
+
+const service = join(import.meta.dirname, "..");
+test("parallel reverification matches serial verdicts and ground JPEGs, and aborts on a replay it cannot run", {
+  skip: !existsSync(join(service, "dist/ui/particles.png")) || !existsSync(join(service, "../crimson-core/build/wasm/core.wasm")),
+  timeout: 60000,
+}, async () => {
+  const directory = mkdtempSync(join(tmpdir(), "crimson-reverify-"));
+  try {
+    const vectors = JSON.parse(readFileSync(join(service, "test/vectors.json"), "utf8"));
+    const refused = join(directory, "refused.crd");
+    writeFileSync(refused, Buffer.from(vectors.illegal_command_run, "base64"));
+    const runs = [
+      { id: "quest", file: join(service, "../tests/fixtures/replays/quest-1.1-completed.crd") },
+      { id: "refused", file: refused },
+      { id: "rush", file: join(service, "../tests/fixtures/replays/rush-kills103.crd") },
+    ];
+    const check = async (jobs) => {
+      const grounds = join(directory, String(jobs));
+      mkdirSync(grounds);
+      const results = await verifyRuns(runs, { jobs, workerData: { service, art: join(service, "dist"), grounds } });
+      assert.deepEqual(results.map(({ ok }) => ok), [true, false, true]);
+      assert.equal(existsSync(join(grounds, "refused.jpg")), false);
+      return {
+        verdicts: results.map(({ seconds, ...result }) => result),
+        grounds: ["quest", "rush"].map((id) => createHash("sha256").update(readFileSync(join(grounds, `${id}.jpg`))).digest("hex")),
+      };
+    };
+    assert.deepEqual(await check(2), await check(1));
+    const unsupported = { id: "typo", file: join(service, "../tests/fixtures/replays/typo-144.crd") };
+    await assert.rejects(verifyRuns([...runs, unsupported], { jobs: 2, workerData: { service, art: join(service, "dist"), grounds: directory } }), /Failed to reverify typo/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 function build(kind, artifactFiles, game = null) {
   // Keys are inserted in the canonical order shared with the Python planner.
@@ -261,6 +296,8 @@ function replayFixture() {
     "package.json": '{"type":"module"}',
     "scripts/deploy-replays.mjs": "planner",
     "scripts/reverify.mjs": "reverify runner",
+    "scripts/reverify-pool.mjs": "worker pool",
+    "scripts/reverify-worker.mjs": "verification worker",
     "scripts/grounds.mjs": "ground upload",
     "wrangler.jsonc": '{"compatibility_date":"2026-08-22"}',
     "migrations/0001.sql": 'CREATE TABLE runs (id TEXT);',
@@ -301,6 +338,7 @@ test("replay identity changes with WASM, rules, new transitive modules, ground r
       ["src/ground.ts", 'export const paint = () => 2; export const groundKey = (id) => `runs/${id}.jpg`;'],
       ["dist/ui/particles.png", "different pixels"],
       ["scripts/grounds.mjs", "new upload policy"],
+      ["scripts/reverify-worker.mjs", "new verification setup"],
       ["package-lock.json", '{"lockfileVersion":3,"version":"changed"}'],
       ["wrangler.jsonc", '{"compatibility_date":"2026-09-01"}'],
       ["migrations/0002.sql", 'ALTER TABLE runs ADD hidden INTEGER;'],
