@@ -154,17 +154,26 @@ const SHOWS = 1 / 512;
 export class Layer {
   readonly rgb: Float32Array;
   readonly clear: Float32Array;
+  // One bit per pixel in horizontal blocks of 32: cleared once the pixel stops showing through. Empty blocks
+  // let an older quad skip covered spans without visiting their pixels. The final block's padding is clipped.
+  private readonly blocks: number;
+  private readonly visible: Uint32Array;
 
   constructor(readonly width: number, readonly height: number) {
     this.rgb = new Float32Array(width * height * 3);
     this.clear = new Float32Array(width * height).fill(1);
+    this.blocks = Math.ceil(width / 32);
+    this.visible = new Uint32Array(this.blocks * height).fill(0xffffffff);
   }
 
   // `cell` of `texture` (a box of its texels, sampled straight) drawn as Grim draws a quad, under what this layer
   // holds: modulated by `color` (0..1, alpha included) as its vertex colour does and blended by the sample's alpha;
   // or, a `shadow`, darkening what lies under by that alpha. A sample whose alpha is at most `alphaRef` (of 255) does
   // neither, as Grim's alpha test drops it.
-  drawQuad(texture: Texture, cell: Box, quad: Quad, color: readonly number[], shadow: boolean, alphaRef: number): void {
+  drawQuad(texture: Texture, cell: Box | PreparedCell, quad: Quad, color: readonly number[], shadow: boolean, alphaRef: number): void {
+    const { sMin, sMax, tMin, tMax } = "sMin" in cell ? cell : FULL_CELL;
+    if (sMin >= sMax || tMin >= tMax) return;
+    const bounded = sMin > 0 || sMax < 1 || tMin > 0 || tMax < 1;
     const cx = quad.x + quad.width / 2;
     const cy = quad.y + quad.height / 2;
     const cos = Math.cos(quad.rotation);
@@ -175,8 +184,13 @@ export class Layer {
     const tx = -sin / quad.height;
     const ty = cos / quad.height;
     const reach = (Math.abs(quad.width * sin) + Math.abs(quad.height * cos)) / 2 + 1;
-    const top = Math.max(0, Math.floor(cy - reach));
-    const bottom = Math.min(this.height, Math.ceil(cy + reach));
+    // Rotate the smaller support rectangle around the original quad centre, leaving sampling coordinates intact.
+    const ox = ((sMin + sMax) * 0.5 - 0.5) * quad.width;
+    const oy = ((tMin + tMax) * 0.5 - 0.5) * quad.height;
+    const tightCy = bounded ? cy + sin * ox + cos * oy : cy;
+    const tightReach = bounded ? (Math.abs(quad.width * (sMax - sMin) * sin) + Math.abs(quad.height * (tMax - tMin) * cos)) / 2 + 1 : reach;
+    const top = Math.max(0, Math.floor(tightCy - tightReach));
+    const bottom = Math.min(this.height, Math.ceil(tightCy + tightReach));
     const [r, g, b, alpha] = color as [number, number, number, number];
     const t = texture.data;
     for (let y = top; y < bottom; y++) {
@@ -184,35 +198,51 @@ export class Layer {
       const s0 = sx * (0.5 - cx) + sy * dy + 0.5;
       const t0 = tx * (0.5 - cx) + ty * dy + 0.5;
       // The row's columns where both lie in [0, 1).
-      const lo = Math.max(0, spanStart(s0, sx), spanStart(t0, tx));
-      const hi = Math.min(this.width, spanEnd(s0, sx), spanEnd(t0, tx));
-      for (let x = lo; x < hi; x++) {
-        const at = y * this.width + x;
-        const clear = this.clear[at]!;
-        if (clear < SHOWS) continue;
-        // The bilinear sample at the pixel's centre, as Canvas.sample() takes it.
-        const u = cell.x + (s0 + sx * x) * cell.width + 0.5;
-        const v = cell.y + (t0 + tx * x) * cell.height + 0.5;
-        if (u < 0 || v < 0 || u >= texture.width - 1 || v >= texture.height - 1) continue;
-        const u0 = u | 0;
-        const v0 = v | 0;
-        const fu = u - u0;
-        const fv = v - v0;
-        const w00 = (1 - fu) * (1 - fv);
-        const w10 = fu * (1 - fv);
-        const w01 = (1 - fu) * fv;
-        const w11 = fu * fv;
-        const t00 = (v0 * texture.width + u0) * 4;
-        const t01 = t00 + texture.width * 4;
-        const a = (t[t00 + 3]! * w00 + t[t00 + 7]! * w10 + t[t01 + 3]! * w01 + t[t01 + 7]! * w11) * alpha;
-        if (a * 255 <= alphaRef) continue;
-        this.clear[at] = clear * (1 - a);
-        if (shadow) continue;
-        const rgb = at * 3;
-        const k = clear * a;
-        this.rgb[rgb] = this.rgb[rgb]! + k * r * (t[t00]! * w00 + t[t00 + 4]! * w10 + t[t01]! * w01 + t[t01 + 4]! * w11);
-        this.rgb[rgb + 1] = this.rgb[rgb + 1]! + k * g * (t[t00 + 1]! * w00 + t[t00 + 5]! * w10 + t[t01 + 1]! * w01 + t[t01 + 5]! * w11);
-        this.rgb[rgb + 2] = this.rgb[rgb + 2]! + k * b * (t[t00 + 2]! * w00 + t[t00 + 6]! * w10 + t[t01 + 2]! * w01 + t[t01 + 6]! * w11);
+      let lo = Math.max(0, spanStart(s0, sx), spanStart(t0, tx));
+      let hi = Math.min(this.width, spanEnd(s0, sx), spanEnd(t0, tx));
+      if (bounded) {
+        lo = Math.max(lo, boundStart(s0, sx, sMin, sMax), boundStart(t0, tx, tMin, tMax));
+        hi = Math.min(hi, boundEnd(s0, sx, sMin, sMax), boundEnd(t0, tx, tMin, tMax));
+      }
+      for (let start = lo; start < hi; ) {
+        const base = start & ~31;
+        const end = Math.min(hi, base + 32);
+        const block = y * this.blocks + (base >>> 5);
+        let mask = this.visible[block]! & (-1 << (start - base)) & (-1 >>> (base + 32 - end));
+        start = end;
+        while (mask) {
+          // Consume the lowest set bit, keeping the surviving pixels in their original left-to-right order.
+          const bit = 31 - Math.clz32(mask & -mask);
+          mask &= mask - 1;
+          const x = base + bit;
+          const at = y * this.width + x;
+          const clear = this.clear[at]!;
+          // The bilinear sample at the pixel's centre, as Canvas.sample() takes it.
+          const u = cell.x + (s0 + sx * x) * cell.width + 0.5;
+          const v = cell.y + (t0 + tx * x) * cell.height + 0.5;
+          if (u < 0 || v < 0 || u >= texture.width - 1 || v >= texture.height - 1) continue;
+          const u0 = u | 0;
+          const v0 = v | 0;
+          const fu = u - u0;
+          const fv = v - v0;
+          const w00 = (1 - fu) * (1 - fv);
+          const w10 = fu * (1 - fv);
+          const w01 = (1 - fu) * fv;
+          const w11 = fu * fv;
+          const t00 = (v0 * texture.width + u0) * 4;
+          const t01 = t00 + texture.width * 4;
+          const a = (t[t00 + 3]! * w00 + t[t00 + 7]! * w10 + t[t01 + 3]! * w01 + t[t01 + 7]! * w11) * alpha;
+          if (a * 255 <= alphaRef) continue;
+          this.clear[at] = clear * (1 - a);
+          // Read back the float32 result so the visibility cutoff uses the stored precision.
+          if (this.clear[at]! < SHOWS) this.visible[block] = this.visible[block]! & ~(1 << bit);
+          if (shadow) continue;
+          const rgb = at * 3;
+          const k = clear * a;
+          this.rgb[rgb] = this.rgb[rgb]! + k * r * (t[t00]! * w00 + t[t00 + 4]! * w10 + t[t01]! * w01 + t[t01 + 4]! * w11);
+          this.rgb[rgb + 1] = this.rgb[rgb + 1]! + k * g * (t[t00 + 1]! * w00 + t[t00 + 5]! * w10 + t[t01 + 1]! * w01 + t[t01 + 5]! * w11);
+          this.rgb[rgb + 2] = this.rgb[rgb + 2]! + k * b * (t[t00 + 2]! * w00 + t[t00 + 6]! * w10 + t[t01 + 2]! * w01 + t[t01 + 6]! * w11);
+        }
       }
     }
   }
@@ -225,6 +255,7 @@ export class Layer {
     }
     this.rgb.fill(0);
     this.clear.fill(1);
+    this.visible.fill(0xffffffff);
   }
 }
 
@@ -276,6 +307,40 @@ export interface Box {
   height: number;
 }
 
+const FULL_CELL = { sMin: 0, sMax: 1, tMin: 0, tMax: 1 };
+// A source cell with conservative alpha-support bounds in its unrotated 0..1 coordinates.
+export interface PreparedCell extends Box {
+  readonly sMin: number;
+  readonly sMax: number;
+  readonly tMin: number;
+  readonly tMax: number;
+}
+// Include each bilinear footprint and neighbouring atlas cells, then an extra texel of margin.
+// Sampling still uses the original cell and quad; these bounds only exclude certainly transparent regions.
+export function prepareCell(texture: Texture, cell: Box): PreparedCell {
+  if (cell.width <= 0 || cell.height <= 0) return Object.freeze({ ...cell, ...FULL_CELL });
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (let y = Math.max(0, Math.floor(cell.y + 0.5)); y <= Math.min(texture.height - 2, Math.floor(cell.y + cell.height + 0.5)); y++)
+    for (let x = Math.max(0, Math.floor(cell.x + 0.5)); x <= Math.min(texture.width - 2, Math.floor(cell.x + cell.width + 0.5)); x++)
+      if (texture.data[(y * texture.width + x) * 4 + 3]! > 0 || texture.data[(y * texture.width + x) * 4 + 7]! > 0 ||
+          texture.data[((y + 1) * texture.width + x) * 4 + 3]! > 0 || texture.data[((y + 1) * texture.width + x) * 4 + 7]! > 0) {
+        minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+        minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+      }
+  // An extra source texel on each side covers coordinate-rounding uncertainty.
+  return Object.freeze({
+    ...cell,
+    sMin: Math.max(0, (minX - cell.x - 1.5) / cell.width), sMax: Math.min(1, (maxX - cell.x + 1.5) / cell.width),
+    tMin: Math.max(0, (minY - cell.y - 1.5) / cell.height), tMax: Math.min(1, (maxY - cell.y + 1.5) / cell.height),
+  });
+}
+function boundStart(f0: number, k: number, low: number, high: number): number {
+  return k > 0 ? Math.ceil((low - f0) / k) : k < 0 ? Math.ceil((high - f0) / k) : f0 >= low && f0 < high ? 0 : Infinity;
+}
+function boundEnd(f0: number, k: number, low: number, high: number): number {
+  return k > 0 ? Math.ceil((high - f0) / k) : k < 0 ? Math.ceil((low - f0) / k) : Infinity;
+}
+
 // `art` stretched over `box` with its borders kept at their size, as CSS border-image draws web/src/style.css .panel,
 // after its silhouette `offset` pixels right and down, darkening what lies under it by `shade` of its alpha.
 export function paintPanel(canvas: Canvas, art: Pixels, borders: { top: number; right: number; bottom: number; left: number }, box: Box, offset: number, shade: number): void {
@@ -293,4 +358,3 @@ export function paintPanel(canvas: Canvas, art: Pixels, borders: { top: number; 
       }
     }
 }
-
