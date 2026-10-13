@@ -5,8 +5,11 @@ import { accountForKey, type Env, json, refuse } from "./http";
 import { outcomeReasons, rankedBoard, rankedScore, unrankedReasons } from "./ranked";
 import type { Signals, Timeline } from "./api-types";
 import { decodeReplay, inflateReplay, type Replay, REPLAY_RULES, ReplayError } from "./replay";
+import { GroundBake, groundArt, groundKey } from "./ground";
+import { encodeJpeg } from "./jpeg";
 import { encodeTransport } from "./transport";
-import { verifyRun } from "./verify";
+import { runGround, SIZE } from "../web/src/terrain/rules";
+import { type Verdict, verifyRun } from "./verify";
 
 const MAX_BODY_BYTES = 16 * 1024 * 1024;
 const NAME_MAX_CHARS = 31;
@@ -74,16 +77,18 @@ export async function postRun(request: Request, env: Env): Promise<Response> {
   const runId = hex(await sha256(transport));
   if (await env.DB.prepare("SELECT 1 FROM runs WHERE id = ?").bind(runId).first()) return refuse(409, "this run was already accepted");
 
-  const verdict = await verifyRun(env, replay, transport);
+  const { verdict, ground } = await verifyWithGround(env, new URL(request.url).origin, replay, transport);
   if (!verdict.ok) return refuse(422, verdict.reason);
 
   const board = rankedBoard(replay.run)!;
-  const quest = replay.run.quest_level ? `${replay.run.quest_level.major}.${replay.run.quest_level.minor}` : "";
+  const quest = questOf(replay);
+
   const score = rankedScore(replay.run, replay.result);
   const now = Date.now();
   const accountId = await accountForKey(env, upload.public_key, publicKey, now);
   await env.REPLAYS.put(`runs/${runId}.crd`, file, { httpMetadata: { contentType: "application/octet-stream" } });
   await putTimeline(env, runId, verdict.timeline);
+  await putGround(env, runId, ground!);
   await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO runs (id, payload_sha256, account_id, public_key, name, board, quest, score, game_version, client,
@@ -104,6 +109,30 @@ export async function postRun(request: Request, env: Env): Promise<Response> {
 }
 
 export const timelineKey = (runId: string) => `runs/${runId}.timeline.json`;
+
+const questOf = (replay: Replay) => (replay.run.quest_level ? `${replay.run.quest_level.major}.${replay.run.quest_level.minor}` : "");
+
+// One run's ground bakes at a time in an isolate: its buffers (about 40 MB) would not fit beside another's.
+let baking: Promise<unknown> = Promise.resolve();
+
+// A run verified with its ground baked along, on the terrain its seed generates, as a JPEG (null when the run does not
+// verify); scripts/reverify.mjs bakes every stored run's this way for a deploy. Only the JPEG outlives the call, so
+// the bake's buffers are let go before anything waits on storage.
+export function verifyWithGround(env: Env, origin: string, replay: Replay, transport: Uint8Array): Promise<{ verdict: Verdict; ground: Uint8Array | null }> {
+  const run = baking.then(async () => {
+    const terrain = runGround(replay.run.seed, { board: rankedBoard(replay.run)!, quest: questOf(replay) });
+    const bake = new GroundBake(terrain, await groundArt(env, origin), SIZE);
+    const verdict = await verifyRun(env, replay, transport, (bakes) => bake.bake(bakes));
+    return { verdict, ground: verdict.ok ? await encodeJpeg(bake.pixels()) : null };
+  });
+  baking = run.catch(() => {});
+  return run;
+}
+
+async function putGround(env: Env, runId: string, jpeg: Uint8Array): Promise<Uint8Array> {
+  await env.REPLAYS.put(groundKey(runId), jpeg, { httpMetadata: { contentType: "image/jpeg" } });
+  return jpeg;
+}
 
 function putTimeline(env: Env, runId: string, timeline: Timeline): Promise<R2Object> {
   return env.REPLAYS.put(timelineKey(runId), JSON.stringify(timeline), { httpMetadata: { contentType: "application/json" } });
@@ -135,4 +164,17 @@ export async function timelineFor(env: Env, runId: string): Promise<Timeline | n
   if (!verdict.ok) throw new Error(`run ${runId} no longer verifies: ${verdict.reason}`);
   await putTimeline(env, runId, verdict.timeline);
   return verdict.timeline;
+}
+
+// A run's ground as it ended (src/ground.ts), as a JPEG. Runs accepted before grounds were baked get theirs the first
+// time it is asked for, by replaying their stored file again; null when there is no such replay.
+export async function groundFor(env: Env, origin: string, runId: string): Promise<Uint8Array | null> {
+  const stored = await env.REPLAYS.get(groundKey(runId));
+  if (stored) return new Uint8Array(await stored.arrayBuffer());
+  const file = await env.REPLAYS.get(`runs/${runId}.crd`);
+  if (!file) return null;
+  const replay = decodeReplay(inflateReplay(new Uint8Array(await file.arrayBuffer())));
+  const { verdict, ground } = await verifyWithGround(env, origin, replay, encodeTransport(replay));
+  if (!verdict.ok) throw new Error(`run ${runId} no longer verifies: ${verdict.reason}`);
+  return putGround(env, runId, ground!);
 }
