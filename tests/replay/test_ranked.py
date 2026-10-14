@@ -111,9 +111,10 @@ def _input(move: MovementControlType = MovementControlType.STATIC, aim_scheme: A
 
 
 def test_aim_stays_inside_the_ranked_view() -> None:
-    # The player starts at the arena centre: a 1024x768 view clamped to the arena shows world y 128..896.
-    assert _monitor(_SURVIVAL, _input(aim=Vec2(600.0, 890.0)), _input(aim=Vec2(1.0, 130.0))) == set()
-    assert _monitor(_SURVIVAL, _input(aim=Vec2(600.0, 905.0))) == {"aim_out_of_view"}
+    # The player starts at the arena centre: a 1024x768 view clamped to the arena shows world y 128..896,
+    # with a 96-unit margin for screen shake and a multi-tick frame of movement.
+    assert _monitor(_SURVIVAL, _input(aim=Vec2(600.0, 990.0)), _input(aim=Vec2(1.0, 35.0))) == set()
+    assert _monitor(_SURVIVAL, _input(aim=Vec2(600.0, 1000.0))) == {"aim_out_of_view"}
     # Pad reach is the stick's, at most `1 * 96 + 42`.
     assert _monitor(_SURVIVAL, _input(MovementControlType.DUAL_ACTION_PAD, AimScheme.DUAL_ACTION_PAD, aim=Vec2(0.0, 138.0))) == set()
     assert _monitor(_SURVIVAL, _input(MovementControlType.DUAL_ACTION_PAD, AimScheme.DUAL_ACTION_PAD, aim=Vec2(0.0, 150.0))) == {
