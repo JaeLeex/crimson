@@ -65,9 +65,14 @@ def _final_revenge(step_runtime: WorldStepRuntime, player: PlayerState) -> None:
     state.sfx_queue.append(SfxRequest(SfxId.SHOCKWAVE, player.pos))
 
 
-def player_take_damage(step_runtime: WorldStepRuntime, player: PlayerState, damage: float, *, dt: float) -> float:
+def player_take_damage(
+    step_runtime: WorldStepRuntime,
+    player: PlayerState,
+    damage: float,
+    *,
+    dt: float,
+) -> float:
     """Port of `player_take_damage`, returning the actual damage applied."""
-
     state = step_runtime.world.state
     players = step_runtime.world.players
     raw_damage = f32(damage)

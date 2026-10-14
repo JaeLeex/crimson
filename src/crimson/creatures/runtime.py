@@ -863,7 +863,7 @@ class CreaturePool:
             ):
                 self._plaguebearer_spread_infection(int(idx))
 
-            creature.anim_phase, _ = creature_anim_advance_phase(
+            creature.anim_phase = creature_anim_advance_phase(
                 creature.anim_phase,
                 anim_rate=CREATURE_ANIM[creature.type_id].anim_rate,
                 move_speed=float(creature.move_speed),
@@ -1131,6 +1131,8 @@ class CreaturePool:
             creature.active = False
             step_runtime.fx_queue.add_random(pos=creature.pos, rng=rng)
 
+        if step_runtime._creature_spatial is not None:
+            step_runtime._creature_spatial.sync_index(idx)
         step_runtime.deaths.append(
             CreatureDeath(
                 index=idx,
