@@ -2,7 +2,8 @@ import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { concat, hex, LOGIN_DOMAIN, RUN_DOMAIN, sha256 } from "../../src/crypto";
 import { decodeReplay, inflateReplay } from "../../src/replay";
-import type { BoardView, LoginView, ProfileView, RunDetailView } from "../../src/api-types";
+import type { BoardView, CustomQuestDetailView, CustomQuestsListView, LoginView, ProfileView, RunDetailView } from "../../src/api-types";
+import { validateRecipeSource } from "../../src/runs";
 import vectors from "../vectors.json";
 
 const ORIGIN = "https://crimson.land";
@@ -435,5 +436,139 @@ describe("bots and moderation", () => {
     expect(await env.DB.prepare("SELECT role FROM accounts WHERE id = ?").bind(owner).first()).toEqual({ role: "mod" });
     // The admin's own role is not one a request can take away.
     expect((await session.post(`/api/mod/roles/${moderator}`, { role: "" })).status).toBe(404);
+  });
+});
+
+describe("custom quests", () => {
+  it("publishing a custom quest with a verified clear replay creates its page, leaderboard, and portable binary", async () => {
+    const player = await Player.create();
+    const file = vectors.custom_quest_run.file;
+    const payloadSha = await sha256(inflateReplay(decode64(file)));
+    const signature = await player.sign(concat(RUN_DOMAIN, payloadSha, new TextEncoder().encode("banteg")));
+    const response = await post("/api/quests", {
+      replay: file,
+      name: "banteg",
+      public_key: player.publicKey,
+      signature,
+      source: vectors.custom_quest_run.source,
+      seed: 0,
+    });
+
+    expect(response.status).toBe(201);
+    const published = (await response.json()) as { id: string; quest: string; digest: string; score: number; url: string };
+    const questId = vectors.custom_quest_run.digest.slice(0, 12);
+    expect(published).toMatchObject({
+      quest: questId,
+      digest: vectors.custom_quest_run.digest,
+      score: vectors.custom_quest_run.score,
+      url: `/q/${questId}`,
+    });
+
+    const detail = (await (await SELF.fetch(`${ORIGIN}/api/q/${questId}`)).json()) as CustomQuestDetailView;
+    expect(detail).toMatchObject({
+      id: questId,
+      digest: vectors.custom_quest_run.digest,
+      title: "Quick Clear",
+      author: "banteg",
+      source: vectors.custom_quest_run.source,
+      first_run_id: published.id,
+      board: { rows: [expect.objectContaining({ rank: 1, run: published.id, score: vectors.custom_quest_run.score })] },
+    });
+
+    const list = (await (await SELF.fetch(`${ORIGIN}/api/quests/custom`)).json()) as CustomQuestsListView;
+    expect(list.quests).toEqual([
+      expect.objectContaining({
+        id: questId,
+        title: "Quick Clear",
+        author: "banteg",
+        entry_count: 1,
+        has_source: true,
+        players: 1,
+        top_score: vectors.custom_quest_run.score,
+      }),
+    ]);
+
+    const bin = await SELF.fetch(`${ORIGIN}/q/${questId}.bin`);
+    expect(bin.status).toBe(200);
+    const binBytes = new Uint8Array(await bin.arrayBuffer());
+    expect(binBytes.byteLength).toBe(6184);
+    expect(hex(await sha256(binBytes))).toBe(vectors.custom_quest_run.digest);
+    const runView = (await (await SELF.fetch(`${ORIGIN}/api/runs/${published.id}`)).json()) as RunDetailView;
+    expect(runView.custom_slots).toEqual([2, 3, 2]);
+
+    const other = await Player.create();
+    const otherSig = await other.sign(concat(RUN_DOMAIN, payloadSha, new TextEncoder().encode("other")));
+    const hijack = await post("/api/quests", {
+      replay: file,
+      name: "other",
+      public_key: other.publicKey,
+      signature: otherSig,
+      source: vectors.custom_quest_run.source,
+    });
+    expect(hijack.status).toBe(403);
+
+    const badSource = await post("/api/quests", {
+      replay: file,
+      name: "banteg",
+      public_key: player.publicKey,
+      signature,
+      source: 'quest "Wrong Title" version 1\nauthor "banteg"\nterrain (2, 3, 2)\nat 0s:\n    spawn alien.small_gray at (512, 448)\n',
+    });
+    expect(badSource.status).toBe(422);
+    const baseQuest = decodeReplay(inflateReplay(decode64(file))).run.custom_quest!;
+    expect(
+      validateRecipeSource(
+        'quest "Quick (Wave #2 [beta]" version 1 # comment\nauthor "banteg [1] #1"\nweapon shotgun\nterrain (2, 3, 2)\nfixed_weapon true\nat 500ms:\n    spawn 0x26 at (512, 420)\n',
+        { ...baseQuest, title: "Quick (Wave #2 [beta]", author: "banteg [1] #1" },
+      ),
+    ).toBe(true);
+    expect(
+      validateRecipeSource(
+        vectors.custom_quest_run.source.replace("weapon shotgun", "weapon pistol"),
+        baseQuest,
+      ),
+    ).toBe(false);
+    expect(
+      validateRecipeSource(
+        vectors.custom_quest_run.source.replace("alien.small_gray", "spider.small_blue"),
+        baseQuest,
+      ),
+    ).toBe(false);
+
+    const otherSession = asSession(await signIn(other));
+    const otherMe = (await (await otherSession.get("/api/me")).json()) as { account: number };
+    await env.DB.prepare(
+      `INSERT INTO runs (id, payload_sha256, account_id, public_key, name, board, quest, score, game_version, client,
+         client_version, platform, pilot, ticks, result, signals, accepted_at)
+       SELECT ?, payload_sha256, ?, ?, 'other', board, quest, score + 100, game_version, client,
+         client_version, platform, pilot, ticks, result, signals, accepted_at + 1
+       FROM runs WHERE id = ?`,
+    ).bind("b".repeat(64), otherMe.account, other.publicKey, published.id).run();
+
+    const session = asSession(await signIn(player));
+    const me = (await (await session.get("/api/me")).json()) as { account: number };
+    const deleted = await session.post("/api/account/delete", { account: me.account });
+    expect(deleted.status).toBe(200);
+
+    const surviving = (await (await SELF.fetch(`${ORIGIN}/api/q/${questId}`)).json()) as CustomQuestDetailView;
+    expect(surviving.creator).toBeNull();
+    expect(surviving.first_run_id).toBe("b".repeat(64));
+
+    expect((await otherSession.post("/api/account/delete", { account: otherMe.account })).status).toBe(200);
+    expect((await SELF.fetch(`${ORIGIN}/api/q/${questId}`)).status).toBe(404);
+  });
+
+  it("POST /api/quests refuses a survival replay", async () => {
+    const player = await Player.create();
+    const payloadSha = await sha256(inflateReplay(decode64(vectors.ranked_run)));
+    const signature = await player.sign(concat(RUN_DOMAIN, payloadSha, new TextEncoder().encode("banteg")));
+    const response = await post("/api/quests", {
+      replay: vectors.ranked_run,
+      name: "banteg",
+      public_key: player.publicKey,
+      signature,
+    });
+    expect(response.status).toBe(422);
+    expect(await reason(response)).toContain("custom quest");
   });
 });

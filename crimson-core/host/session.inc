@@ -56,6 +56,7 @@ static struct {
   bool watching; // the run plays a replay (watch.inc)
   bool practicing; // detached Watch state driven by live input (practice.inc)
 } live;
+static bool custom_quest_restore_menu, custom_quest_saved_ranked;
 
 static bool practice_take();
 static const char *practice_reason();
@@ -198,6 +199,8 @@ static void live_begin() {
     return;
   live.replay.clear();
   live_append(&cfg, sizeof cfg);
+  if (cfg.mode == GAME_MODE_QUEST && cfg.major == 0 && cfg.minor == 0)
+    live_append(&quest, sizeof quest);
 }
 
 // The run is over (`outcome`: "death", "quest_completed", or "incomplete" for a
@@ -460,6 +463,7 @@ void game_live_quit() {
     watch_stop();
   else if (game_live)
     live_end("incomplete");
+  custom_quest_restore();
   ranked_release();
 }
 bool game_live_pause() {
@@ -511,13 +515,37 @@ void game_state_set(game_state_id_t state) {
   else if (game_live && state != GAME_STATE_GAMEPLAY && state != GAME_STATE_PERK_SELECTION &&
            state != GAME_STATE_PAUSE_MENU && state != GAME_STATE_OPTIONS_MENU && state != GAME_STATE_CONTROLS_MENU)
     live_end("incomplete");
-  bool starts = state == GAME_STATE_GAMEPLAY && !run_active && live_eligible();
+  bool entering_gameplay = state == GAME_STATE_GAMEPLAY && !run_active;
+  bool starts = entering_gameplay && live_eligible();
   // The run a replay starts counts in none of the player's statistics.
   game_status_t status = game_status_blob;
   {
     // A replay's run starts unheard (a quest's start readies its weapon), as
     // the preparing pass that follows plays it.
     WatchUnheard unheard(watches);
+    if (entering_gameplay) {
+      bool custom = config_blob.game_mode == GAME_MODE_QUEST && quest_stage_major == 0 && quest_stage_minor == 0;
+      if (custom) {
+        custom_quest_meta = quest_meta_t{};
+        custom_quest_meta.name = custom_quest_title;
+        custom_quest_meta.terrain_id = (int)quest.terrain[0];
+        custom_quest_meta.terrain_id_b = (int)quest.terrain[1];
+        custom_quest_meta.terrain_id_c = (int)quest.terrain[2];
+        custom_quest_meta.builder = custom_quest_build;
+        custom_quest_meta.start_weapon_id = (int)quest.weapon_id;
+      } else {
+        custom_quest_restore();
+        if (config_blob.game_mode == GAME_MODE_QUEST && (quest_stage_major < 1 || quest_stage_minor < 1))
+          quest_stage_major = quest_stage_minor = 1;
+      }
+      portable_custom_quest = custom ? &custom_quest_meta : nullptr;
+    } else if (state != GAME_STATE_GAMEPLAY && state != GAME_STATE_PERK_SELECTION &&
+               state != GAME_STATE_PAUSE_MENU && state != GAME_STATE_OPTIONS_MENU &&
+               state != GAME_STATE_CONTROLS_MENU && state != GAME_STATE_QUEST_RESULTS &&
+               state != GAME_STATE_QUEST_FAILED) {
+      portable_custom_quest = nullptr;
+      custom_quest_restore();
+    }
     game_state_set_recovered(state);
     if (watches) {
       game_status_blob = status;
