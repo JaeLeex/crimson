@@ -19,6 +19,7 @@
 #include <math.h>
 #include <sstream>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -34,6 +35,13 @@ std::string game_directory = ".";
 SDL_Window *window;
 SDL_GLContext context;
 float wheel;
+// Every gamepad SDL reports is open; the one used last plays: a pad takes over
+// with a fresh press, not while its inputs are merely held (`held`, last frame's).
+struct Pad {
+  SDL_Gamepad *gamepad;
+  Uint64 held;
+};
+std::vector<Pad> gamepads;
 SDL_Gamepad *gamepad;
 bool held[8];
 int hold_frames[8];
@@ -169,6 +177,31 @@ void capture_frame() {
 // frames) where an
 // action is "move x y" (back-buffer pixels), "press button" or "release button"
 // (0 left, 1 right), or "key code" / "unkey code" (DirectInput scancodes, hex).
+// Virtual gamepads stand in for real ones: "padattach n", "paddetach n",
+// "padbutton name 0|1 n" and "padaxis name value n" for pad n, 0 when left out
+// (SDL's names: "a", "dpup", "start", "leftx", "righttrigger"; axes -32768 to 32767).
+SDL_Joystick *scripted_pads[4];
+void script_pad(const char *verb, const char *name, int value, int index) {
+  SDL_Joystick *&joystick = scripted_pads[index & 3];
+  if (!strcmp(verb, "padattach") && !joystick) {
+    SDL_VirtualJoystickDesc desc;
+    SDL_INIT_INTERFACE(&desc);
+    desc.type = SDL_JOYSTICK_TYPE_GAMEPAD;
+    desc.naxes = SDL_GAMEPAD_AXIS_COUNT;
+    desc.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+    desc.name = "Scripted gamepad";
+    joystick = SDL_OpenJoystick(SDL_AttachVirtualJoystick(&desc));
+  } else if (!strcmp(verb, "paddetach") && joystick) {
+    SDL_JoystickID id = SDL_GetJoystickID(joystick);
+    SDL_CloseJoystick(joystick);
+    SDL_DetachVirtualJoystick(id);
+    joystick = nullptr;
+  } else if (!strcmp(verb, "padbutton") && joystick) {
+    SDL_SetJoystickVirtualButton(joystick, SDL_GetGamepadButtonFromString(name), value != 0);
+  } else if (!strcmp(verb, "padaxis") && joystick) {
+    SDL_SetJoystickVirtualAxis(joystick, SDL_GetGamepadAxisFromString(name), (Sint16)value);
+  }
+}
 struct Scripted {
   int frame;
   std::string action;
@@ -194,11 +227,18 @@ void run_script(int frame) {
   for (const Scripted &s : script) {
     if (s.frame != frame)
       continue;
-    char verb[16] = {};
+    char verb[16] = {}, name[32] = {};
     float a = 0, b = 0;
     sscanf(s.action.c_str(), "%15s %f %f", verb, &a, &b);
     HostInput *in = input();
-    if (!strcmp(verb, "move")) {
+    if (!strncmp(verb, "pad", 3)) {
+      int value = 0, index = 0;
+      if (!strcmp(verb, "padattach") || !strcmp(verb, "paddetach"))
+        sscanf(s.action.c_str(), "%*s %d", &index);
+      else
+        sscanf(s.action.c_str(), "%*s %31s %d %d", name, &value, &index);
+      script_pad(verb, name, value, index);
+    } else if (!strcmp(verb, "move")) {
       scripted_x = a;
       scripted_y = b;
     } else if (!strcmp(verb, "press") || !strcmp(verb, "release")) {
@@ -212,13 +252,35 @@ void run_script(int frame) {
   }
 }
 
+// The buttons held, and the sticks and triggers past half travel, either way, as bits.
+static_assert(SDL_GAMEPAD_BUTTON_COUNT + 2 * SDL_GAMEPAD_AXIS_COUNT <= 64, "a pad's inputs fit its bits");
+Uint64 pad_held(SDL_Gamepad *pad) {
+  Uint64 held = 0;
+  for (int button = 0; button < SDL_GAMEPAD_BUTTON_COUNT; ++button)
+    held |= (Uint64)SDL_GetGamepadButton(pad, (SDL_GamepadButton)button) << button;
+  for (int axis = 0; axis < SDL_GAMEPAD_AXIS_COUNT; ++axis) {
+    int value = SDL_GetGamepadAxis(pad, (SDL_GamepadAxis)axis);
+    held |= (Uint64)(value > 16384) << (SDL_GAMEPAD_BUTTON_COUNT + 2 * axis);
+    held |= (Uint64)(value < -16384) << (SDL_GAMEPAD_BUTTON_COUNT + 2 * axis + 1);
+  }
+  return held;
+}
+
 // The gamepad, as the Logitech Dual Action layout the module's joystick reports
 // (game/dinput.cpp): buttons 1-4 are the west, south, east and north faces, then
-// the shoulders, the triggers, back, start and the stick clicks.
+// the shoulders, the triggers, back, start and the stick clicks. SDL lays out
+// PlayStation, Xbox and Switch pads alike, the faces by position.
 void pad(HostInput *in) {
   memset(in->pad_axes, 0, sizeof in->pad_axes);
   memset(in->pad_buttons, 0, sizeof in->pad_buttons);
   in->pad_hat = ~0u;
+  for (Pad &pad : gamepads) {
+    Uint64 held = pad_held(pad.gamepad);
+    if (held & ~pad.held)
+      gamepad = pad.gamepad;
+    pad.held = held;
+  }
+  in->pad_connected = gamepad != nullptr;
   if (!gamepad)
     return;
   static const SDL_GamepadAxis axes[] = {SDL_GAMEPAD_AXIS_LEFTX, SDL_GAMEPAD_AXIS_LEFTY, SDL_GAMEPAD_AXIS_RIGHTX,
@@ -724,6 +786,9 @@ SDL_AppResult SDL_AppInit(void **, int argc, char **argv) {
     game_directory = runtime_directory();
   fetch_assets();
 #endif
+  // An unattended run's window never has the focus SDL wants before a pad counts.
+  if (unattended)
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
   if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMEPAD))
     client_fatal(SDL_GetError());
 #ifdef __EMSCRIPTEN__
@@ -805,22 +870,22 @@ SDL_AppResult SDL_AppEvent(void *, SDL_Event *event) {
     break;
   }
   case SDL_EVENT_GAMEPAD_ADDED:
-    if (!gamepad)
-      gamepad = SDL_OpenGamepad(event->gdevice.which);
+    if (SDL_Gamepad *added = SDL_OpenGamepad(event->gdevice.which)) {
+      gamepads.push_back({added, 0});
+      if (!gamepad)
+        gamepad = added;
+    }
     break;
   case SDL_EVENT_GAMEPAD_REMOVED:
-    if (gamepad && SDL_GetGamepadID(gamepad) == event->gdevice.which) {
-      SDL_CloseGamepad(gamepad);
-      gamepad = nullptr;
-      // Another pad still connected takes over.
-      int count;
-      if (SDL_JoystickID *pads = SDL_GetGamepads(&count)) {
-        for (int i = 0; i < count && !gamepad; ++i)
-          if (pads[i] != event->gdevice.which)
-            gamepad = SDL_OpenGamepad(pads[i]);
-        SDL_free(pads);
+    for (size_t i = 0; i < gamepads.size(); ++i)
+      if (SDL_GetGamepadID(gamepads[i].gamepad) == event->gdevice.which) {
+        SDL_CloseGamepad(gamepads[i].gamepad);
+        // Another pad still connected takes over.
+        if (gamepads[i].gamepad == gamepad)
+          gamepad = gamepads.size() > 1 ? gamepads[i ? 0 : 1].gamepad : nullptr;
+        gamepads.erase(gamepads.begin() + i);
+        break;
       }
-    }
     break;
   case SDL_EVENT_MOUSE_WHEEL:
     wheel += event->wheel.y * 120;

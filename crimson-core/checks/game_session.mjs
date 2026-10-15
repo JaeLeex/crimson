@@ -18,10 +18,20 @@
 // by the player's key, with the result the verifier derives (service/src/verify.ts).
 // With --quest the run is quest 1.1 instead, and must be completed.
 //
+// With --pad a gamepad alone plays (game/pad.cpp), a quest too with --quest:
+// the d-pad, the left stick and A walk the menus to the run, past a stick
+// resting short of a step; the left stick moves away from the nearest
+// creature, the right stick aims at it and R2 fires; Triangle asks for the perk
+// menu, and the d-pad and A pick while the mouse rests on another choice; Start
+// pauses, Start or B resumes; the pad disconnects for a while mid-run and comes
+// back; and on the end screen the name field takes A, then Main Menu. A fresh
+// profile takes the pad profile on first use, so the run records the Dual
+// Action Pad schemes.
+//
 // A replay a link asks for as the run starts (host/watch.inc game_watch) gives
 // way to it: the run plays, and its end screen stays.
 //
-//   node crimson-core/checks/game_session.mjs [--seed n] [--ranked] [--quest] <game directory> [core.wasm] [game.wasm]
+//   node crimson-core/checks/game_session.mjs [--seed n] [--ranked] [--quest] [--pad] <game directory> [core.wasm] [game.wasm]
 import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -35,14 +45,14 @@ let args = process.argv.slice(2);
 const seedAt = args.indexOf("--seed");
 const seedOverride = seedAt < 0 ? undefined : Number(args[seedAt + 1]);
 if (seedAt >= 0) args = args.toSpliced(seedAt, 2);
-const ranked = args.includes("--ranked"), quest = args.includes("--quest");
-args = args.filter((arg) => arg !== "--ranked" && arg !== "--quest");
+const ranked = args.includes("--ranked"), quest = args.includes("--quest"), padded = args.includes("--pad");
+args = args.filter((arg) => !["--ranked", "--quest", "--pad"].includes(arg));
 const [
   directory,
   coreWasm = new URL("build/wasm/core.wasm", CORE).pathname,
   gameWasm = new URL("build/game/game.wasm", CORE).pathname,
 ] = args;
-if (!directory) throw Error("usage: game_session.mjs [--seed n] [--ranked] [--quest] <game directory> [core.wasm] [game.wasm]");
+if (!directory) throw Error("usage: game_session.mjs [--seed n] [--ranked] [--quest] [--pad] <game directory> [core.wasm] [game.wasm]");
 
 const run = bootGame(gameWasm, directory, seedOverride, { leaderboard: ranked });
 const { game } = run;
@@ -50,18 +60,27 @@ const clientVersion = "0.14.2+build.000000000000000000000000";
 Buffer.from(game.memory.buffer).write(`${clientVersion}\0`, game.game_recorder_version(), "ascii");
 
 // game_state_id_t
-const MAIN_MENU = 0, PLAY_GAME_MENU = 1, PAUSE_MENU = 5, PERK_SELECTION = 6, GAME_OVER = 7, QUEST_RESULTS = 8, GAMEPLAY = 9;
+const MAIN_MENU = 0, PLAY_GAME_MENU = 1, PAUSE_MENU = 5, PERK_SELECTION = 6, GAME_OVER = 7, QUEST_RESULTS = 8, GAMEPLAY = 9,
+  QUEST_SELECT = 11;
 // DirectInput scancodes.
 const [ESCAPE, W, A, S, D, CONSOLE, SPACE] = [0x01, 0x11, 0x1e, 0x1f, 0x20, 0x29, 0x39];
 // Where a fresh 1024x768 profile lays out the perk menu's first choice (the
 // rest follow 19 pixels apart) and the pause menu's Resume.
 const PERK_CHOICE = [150, 216], RESUME = [232, 397];
+// A pad player's mouse rests where it covers no widget.
+const PAD_CURSOR = [1000, 740];
+
+// The pad as the host lays it out (game/host_input.h): buttons by index, the
+// sticks from -1000 to 1000, and the d-pad as the hat, in hundredths of a degree.
+const [PAD_SOUTH, PAD_EAST, PAD_NORTH, PAD_R2, PAD_START] = [1, 2, 3, 7, 9];
+const [HAT_UP, HAT_DOWN] = [0, 18000];
 
 // A frame of play: held keys and buttons, the cursor as DirectInput motion, and
 // tapped keys held for the frame and delivered as presses, then released. The
-// host pulls a 60 Hz frame of the mix after each, as the client does.
+// host pulls a 60 Hz frame of the mix after each, as the client does. With
+// --pad the pad is connected unless `pad` says otherwise.
 let held = new Set();
-function frame(dt, { cursor, buttons = 0, keys = [], taps = [] }) {
+function frame(dt, { cursor, buttons = 0, keys = [], taps = [], pad = {} }) {
   const input = run.input();
   const events = [...taps.map((k) => [k, 1]), ...[...held].filter((k) => !taps.includes(k)).map((k) => [k, 0])];
   for (const [key, down] of events) {
@@ -76,8 +95,54 @@ function frame(dt, { cursor, buttons = 0, keys = [], taps = [] }) {
   input.setInt32(INPUT.motion_x, Math.round(game.game_motion_x(cursor[0])), true);
   input.setInt32(INPUT.motion_y, Math.round(game.game_motion_y(cursor[1])), true);
   input.setUint8(INPUT.buttons, buttons & 1 ? 0x80 : 0);
+  const { connected = padded, left = [0, 0], right = [0, 0], press = [], hat = 0xffffffff } = pad;
+  input.setUint8(INPUT.pad_connected, connected ? 1 : 0);
+  [...left, ...right].forEach((value, i) => input.setInt32(INPUT.pad_axes + 4 * i, Math.round(value), true));
+  input.setUint32(INPUT.pad_hat, hat, true);
+  for (let button = 0; button < 32; ++button) input.setUint8(INPUT.pad_buttons + button, press.includes(button) ? 0x80 : 0);
   run.frame(dt);
   game.game_audio(735);
+}
+
+// Waits on a screen until it settles, false if it closes first.
+function settle(screen, cursor = PAD_CURSOR, pad = {}) {
+  for (let settled = 0, frames = 0; settled < 60; ++frames) {
+    if (frames > 3000) throw Error(`screen ${screen} never settled`);
+    frame(16, { cursor, pad });
+    if (settled && game.game_state() !== screen) return false;
+    settled = game.game_state() === screen ? settled + 1 : 0;
+  }
+  return true;
+}
+// Taps the pad: a press for a few frames, then a release, or until the screen changes.
+function tap(pad, cursor = PAD_CURSOR) {
+  const screen = game.game_state();
+  for (let i = 0; i < 6 && game.game_state() === screen; ++i) frame(16, { cursor, pad: i < 3 ? pad : {} });
+}
+// A after `downs` steps down the screen from its first widget, by the d-pad or `step`.
+function choose(screen, downs, step = { hat: HAT_DOWN }) {
+  settle(screen);
+  for (let i = 0; i < downs; ++i) tap(step);
+  tap({ press: [PAD_SOUTH] });
+}
+// An end screen by the pad: R2, the fire key, skips a quest's reveal of its
+// time; below Ok, the name field takes A as a typed Enter, which saves the
+// score; then Main Menu, the last of `buttons`.
+function leaveByPad(screen, buttons) {
+  settle(screen);
+  if (screen === QUEST_RESULTS) {
+    tap({ press: [PAD_R2] });
+    settle(screen);
+  }
+  tap({ hat: HAT_DOWN });
+  tap({ press: [PAD_SOUTH] });
+  const scores = path.join(directory, "scores5");
+  for (let frames = 0; !fs.existsSync(scores) || !fs.readdirSync(scores).length; ++frames) {
+    if (frames > 120) throw Error(`A on screen ${screen}'s name field saved no score`);
+    frame(16, { cursor: PAD_CURSOR });
+  }
+  choose(screen, buttons - 1);
+  settle(MAIN_MENU);
 }
 
 // Holds the cursor on a spot until the screen settles, then clicks it. A menu
@@ -95,21 +160,36 @@ function click(screen, at) {
 
 // On a fresh profile the main menu shares its screen id with the startup
 // sequence, which ends after about 14 s.
-while (run.clock < 15000) frame(16, { cursor: [512, 384] });
-click(MAIN_MENU, [240, 338]);
+while (run.clock < 15000) frame(16, { cursor: padded ? PAD_CURSOR : [512, 384] });
+if (padded) {
+  if (ranked) throw Error("--pad plays unranked");
+  // The original's analog cursor follows a bound stick; with a pad the stick
+  // steps the focus instead, and one resting short of a step moves nothing.
+  settle(MAIN_MENU, PAD_CURSOR, { left: [0, 350] });
+  if (game.game_motion_x(PAD_CURSOR[0]) || game.game_motion_y(PAD_CURSOR[1])) throw Error("a resting stick moved the menu cursor");
+  // The main menu starts on Play Game.
+  choose(MAIN_MENU, 0);
+} else click(MAIN_MENU, [240, 338]);
 const unlocksBefore = savedUnlocks();
 // A fresh profile's Play Game panel lists Tutorial, Quests, Rush and Survival;
 // ticking Ranked, under the player-count list, leaves Quests and Survival.
-if (ranked) click(PLAY_GAME_MENU, [285, 489]);
-if (quest) {
-  // Quests, then 1.1 on the quest list.
-  click(PLAY_GAME_MENU, [232, ranked ? 318 : 350]);
-  for (let frames = 0; game.game_state() === PLAY_GAME_MENU; ++frames) {
-    if (frames > 600) throw Error("the quest list never opened");
-    frame(16, { cursor: [250, 296] });
-  }
-  click(game.game_state(), [250, 296]);
-} else click(PLAY_GAME_MENU, [232, ranked ? 350 : 414]);
+if (padded) {
+  // The panel starts on its player count, above Tutorial, Quests, Rush and
+  // Survival, which the left stick steps to; the quest list starts on 1.1.
+  choose(PLAY_GAME_MENU, quest ? 2 : 4, { left: [0, 800] });
+  if (quest) choose(QUEST_SELECT, 0);
+} else {
+  if (ranked) click(PLAY_GAME_MENU, [285, 489]);
+  if (quest) {
+    // Quests, then 1.1 on the quest list.
+    click(PLAY_GAME_MENU, [232, ranked ? 318 : 350]);
+    for (let frames = 0; game.game_state() === PLAY_GAME_MENU; ++frames) {
+      if (frames > 600) throw Error("the quest list never opened");
+      frame(16, { cursor: [250, 296] });
+    }
+    click(game.game_state(), [250, 296]);
+  } else click(PLAY_GAME_MENU, [232, ranked ? 350 : 414]);
+}
 const fixtures = new URL("../tests/fixtures/replays/", CORE).pathname;
 fs.mkdirSync(path.join(directory, "watched"), { recursive: true });
 fs.copyFileSync(path.join(fixtures, "quest-1.1-completed.crd"), path.join(directory, "watched/linked.crd"));
@@ -138,24 +218,49 @@ function target() {
       away = [px - x, py - y];
     }
   }
-  return { aim, away };
+  return { aim, away, toward: [-away[0], -away[1]] };
 }
+// A stick pushed all the way along a direction.
+const stick = ([x, y]) => (x || y ? [(x * 1000) / Math.hypot(x, y), (y * 1000) / Math.hypot(x, y)] : [0, 0]);
 
 // Frame times from 4 ms (most frames run no tick) to 50 ms (three ticks).
 const times = [16, 7, 33, 16, 50, 4, 16, 12, 21];
-let started = false, seed, ticks = 0, frames = 0, idle = 0, choice = 0, pauses = 0, picked = false;
+let started = false, seed, ticks = 0, frames = 0, idle = 0, choice = 0, pauses = 0, resumes = 0, picked = false;
+// With --pad the pad is away for a stretch of the run, then comes back.
+const UNPLUGGED = quest ? [600, 800] : [1500, 1700];
+let unplugged = false;
 while (true) {
   const screen = game.game_state();
   if (screen === PERK_SELECTION) {
-    const at = [PERK_CHOICE[0], PERK_CHOICE[1] + 19 * (choice++ % 5)];
-    click(PERK_SELECTION, at);
-    // A second click as the menu closes, which picks no more than the verifier allows.
-    for (let i = 0; i < 3; ++i) frame(16, { cursor: at, buttons: 1 });
+    if (padded) {
+      // The mouse rests on the fifth choice, which takes the focus until the
+      // pad leads; the d-pad steps up to another and A picks it, and again as
+      // the menu closes. A choice the mouse hovers is no pick.
+      const parked = [PERK_CHOICE[0], PERK_CHOICE[1] + 19 * 4];
+      if (!settle(PERK_SELECTION, parked)) continue;
+      for (let i = 0; i < 1 + (choice++ % 4); ++i) tap({ hat: HAT_UP }, parked);
+      tap({ press: [PAD_SOUTH] }, parked);
+      tap({ press: [PAD_SOUTH] }, parked);
+      for (let frames = 0; game.game_state() === PERK_SELECTION; ++frames) {
+        if (frames > 120) throw Error("A on the focused perk left the perk menu open under the mouse");
+        frame(16, { cursor: parked });
+      }
+    } else {
+      const at = [PERK_CHOICE[0], PERK_CHOICE[1] + 19 * (choice++ % 5)];
+      click(PERK_SELECTION, at);
+      // A second click as the menu closes, which picks no more than the verifier allows.
+      for (let i = 0; i < 3; ++i) frame(16, { cursor: at, buttons: 1 });
+    }
     picked = true;
     continue;
   }
   if (screen === PAUSE_MENU) {
-    click(PAUSE_MENU, RESUME);
+    if (padded) {
+      // Start resumes, and so does B.
+      if (!settle(PAUSE_MENU)) continue;
+      tap({ press: [pauses % 2 ? PAD_START : PAD_EAST] });
+    } else click(PAUSE_MENU, RESUME);
+    ++resumes;
     continue;
   }
   const taps = [];
@@ -169,7 +274,8 @@ while (true) {
     if (picked || (field(core, "globals.perk_pending_count") > 0 && frames % 30 === 0)) taps.push(SPACE);
     picked = false;
     if (frames % 997 === 500) taps.push(CONSOLE);
-    if (ticks > 1200 * (pauses + 1) && pauses < 2) {
+    // Start resumes a paused run, so the pad pauses again only once resumed.
+    if (ticks > 1200 * (pauses + 1) && pauses < 2 && (!padded || resumes === pauses)) {
       taps.push(ESCAPE);
       ++pauses;
     }
@@ -177,7 +283,17 @@ while (true) {
   // Fire in bursts, so presses and releases both fall between ticks.
   const buttons = Math.floor(run.clock / 333) % 4 === 3 ? 0 : 1;
   const dt = times[frames++ % times.length];
-  frame(started ? dt : 50, { cursor, buttons, keys, taps });
+  if (padded) {
+    // The sticks move away from the nearest creature and aim at it, R2 fires,
+    // Triangle asks for the perk menu and Start pauses.
+    const { toward, away } = started ? target() : { toward: [0, 0], away: [0, 0] };
+    const press = [...(buttons ? [PAD_R2] : []), ...(taps.includes(SPACE) ? [PAD_NORTH] : []),
+      ...(taps.includes(ESCAPE) ? [PAD_START] : [])];
+    const connected = !(ticks > UNPLUGGED[0] && ticks < UNPLUGGED[1]);
+    unplugged ||= !connected;
+    frame(started ? dt : 50, { cursor: PAD_CURSOR, taps: taps.filter((key) => key === CONSOLE),
+      pad: connected ? { left: stick(away), right: stick(toward), press } : { connected } });
+  } else frame(started ? dt : 50, { cursor, buttons, keys, taps });
 
   const recorded = replay();
   if (!started) {
@@ -206,7 +322,7 @@ while (true) {
 }
 // The end screen stays: the link gave way to the run.
 const ended = game.game_state();
-for (let i = 0; i < 120; ++i) frame(16, { cursor: [700, 700] });
+for (let i = 0; i < 120; ++i) frame(16, { cursor: padded ? PAD_CURSOR : [700, 700] });
 if (game.game_watch_status() !== -1 || game.game_state() !== ended) throw Error("a link replaced the run's end screen");
 fs.rmSync(path.join(directory, "watched"), { recursive: true });
 // The run ended where the verifier ends it: one more tick is refused.
@@ -217,6 +333,13 @@ for (const r of decode(replay()).records)
   for (let i = 0; i < r.readUInt32LE(20); i++) ++commands[r.readInt32LE(24 + i * 8)];
 // A Survival run plays long enough to pick perks and pause twice.
 if (!quest && (!commands[1] || pauses < 2)) throw Error(`the run picked ${commands[1]} perks and paused ${pauses} times`);
+if (padded) {
+  if (!unplugged || ticks < UNPLUGGED[1]) throw Error(`the run ended at tick ${ticks}, before the pad came back`);
+  // The pad's first press switched the fresh profile to the pad profile: every tick moves and aims by the sticks.
+  const schemes = decode(replay()).records.map((r) => `${(r.readUInt32LE(16) >> 9) & 7}/${(r.readUInt32LE(16) >> 13) & 7}`);
+  const other = schemes.find((scheme) => scheme !== "3/4");
+  if (other) throw Error(`a tick moves and aims by schemes ${other}, not the pad's 3/4`);
+}
 // The run's replay, the first numbered one in a fresh game folder, which the Python port reads.
 const saved = fs.readdirSync(path.join(directory, "replays")).filter((name) => /^\d+-[a-z]+\.crd$/.test(name));
 if (saved.join() !== (quest ? "1-quest.crd" : "1-survival.crd")) throw Error(`the replays are ${saved.join(", ")}`);
@@ -233,7 +356,10 @@ if (!game.game_replay_open()) throw Error("the module cannot play its own replay
 const reread = memory().subarray(game.game_replay_recording(), game.game_replay_recording() + game.game_replay_recording_size());
 if (!reread.equals(replay())) throw Error("the saved replay reads back differently from the recording");
 if (ranked) checkRanked();
-console.log(JSON.stringify({ seed, ticks, frames, picks: commands[1], pauses }));
+// Main Menu is the last of Play Again, High scores and Main Menu, or with
+// Play Next above them on a quest's.
+if (padded) leaveByPad(quest ? QUEST_RESULTS : GAME_OVER, quest ? 4 : 3);
+console.log(JSON.stringify({ seed, ticks, frames, picks: commands[1], pauses, ...(padded ? { pad: true } : {}) }));
 
 // The quests the player's save unlocks (game.cfg, src/crimson/persistence/save_status.py).
 function savedUnlocks() {
