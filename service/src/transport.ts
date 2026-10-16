@@ -1,9 +1,12 @@
-// The crimson-core input stream for a replay, a port of crimson-core/checks/replay.py: a 65-word config, then per
-// tick the player's four f32 axes, the flag word, the command count and each command as (kind, argument).
+// The crimson-core input stream for a replay, a port of crimson-core/checks/replay.py: a 66-word config, then per
+// tick the player's four f32 axes, the flag word, the command count and each command as (kind, argument). The
+// service verifies one-player runs, so every tick has one input.
 
 import { type CustomQuest, GameMode, type Replay } from "./replay";
 
-export const CONFIG_BYTES = 65 * 4;
+export const CONFIG_BYTES = 66 * 4;
+// The config word holding the player count, which the stream gained after runs were first accepted.
+const PLAYERS_WORD = 12;
 export const QUEST_HEAD_BYTES = 10 * 4;
 export const QUEST_SPAWN_BYTES = 24;
 export const QUEST_BYTES = QUEST_HEAD_BYTES + 256 * QUEST_SPAWN_BYTES;
@@ -76,6 +79,7 @@ export function encodeTransport(replay: Replay): Uint8Array {
     Number(run.hardcore),
     run.quest_fail_retry_count,
     Number(run.preserve_bugs),
+    run.player_count,
     ...run.status.weapon_usage_counts,
   ];
   config.forEach((word, i) => view.setUint32(i * 4, word >>> 0, true));
@@ -97,5 +101,16 @@ export function encodeTransport(replay: Replay): Uint8Array {
       at += COMMAND_BYTES;
     }
   }
+  return bytes;
+}
+
+// The bytes a run's id hashes: its stream as the service first encoded it, without the player count. Ids name stored
+// replays, links and the duplicate check, so they stay put when the stream's layout changes. The service takes
+// one-player runs only, so the dropped word is always 1.
+export function runIdentity(transport: Uint8Array): Uint8Array {
+  const at = PLAYERS_WORD * 4;
+  const bytes = new Uint8Array(transport.length - 4);
+  bytes.set(transport.subarray(0, at));
+  bytes.set(transport.subarray(at + 4), at);
   return bytes;
 }
