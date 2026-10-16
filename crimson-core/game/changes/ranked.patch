@@ -111,18 +111,18 @@ records.
      for (int calc_index = 0; calc_index < 41; calc_index++) {
          ui_element_layout_calc(ui_element_table[calc_index]);
      }
---- a/decomp/1.9/crimsonland/highscore/highscore_load_table.c
-+++ b/decomp/1.9/crimsonland/highscore/highscore_load_table.c
-@@ -35,6 +35,8 @@
-     record->random_tag = crt_rand() & 0x0fee050f;
- }
+--- a/decomp/1.9/crimsonland/highscore/highscore_load_table.cpp
++++ b/decomp/1.9/crimsonland/highscore/highscore_load_table.cpp
+@@ -55,6 +55,8 @@
+ #endif
  
 +extern "C" FILE *highscore_table_open(char *path);
 +
  void highscore_load_table(void)
  {
-     highscore_record_t stored;
-@@ -53,7 +55,7 @@
+     highscore_record_cpp_t stored;
+     char *path;
+@@ -72,7 +74,7 @@
      }
  
      count = 0;
