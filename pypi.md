@@ -4,7 +4,7 @@ A faithful reimplementation of [Crimsonland](https://en.wikipedia.org/wiki/Crims
 "Crimsonland Classic") in Python and raylib. Survival, Rush, all five quest tiers, Tutorial, Typ-o-Shooter, local
 co-op and the secrets are here, and they play like the original down to its timings, random rolls and rounding.
 
-The original game assets are distributed with permission from the original developer, and the game downloads them on
+The original game assets are distributed with permission from 10tons, and the game downloads them on
 first launch.
 
 ## Play
@@ -28,7 +28,7 @@ The port plays like the 2003 game, and adds what a modern release needs:
 - **Modern controllers.** PlayStation, Xbox and Switch Pro controllers are recognized on connect and switch a player to twin-stick controls, with reload on the shoulder like the 2014 remake. Every menu, list and slider works from the controller, with the focus always visible, and each co-op player can use their own controller.
 - **Original bugs fixed, and kept on request.** [The original's gameplay bugs](https://crimson.banteg.xyz/rewrite/original-bugs/) are fixed by default, each traced to the decompiled code: Greater Regeneration did nothing, Bandage multiplied health instead of healing, some bonuses never dropped while you held certain weapons, and several co-op perks only worked for player 1. `--preserve-bugs` restores every one of them, exactly as the original behaves. The original's text stays as written, typos like "Fire Caugh" and "Plague Sphreader Gun" included.
 - **Replays.** Every run is recorded and can be played back, verified tick by tick, or rendered to 60 fps video.
-- **Sharper art.** Textures come from the original uncompressed source art wherever it matches what shipped.
+- **Sharper art.** The original shipped its textures as JPEG-compressed JAZ files. The game uses the uncompressed source art from 10tons instead, free of JPEG artifacts, wherever it matches what shipped.
 
 ## Controls
 
@@ -82,6 +82,40 @@ crimson replay verify <file>
 crimson replay render <file>    # needs ffmpeg
 ```
 
+## Leaderboard
+
+Tick Ranked in the Play Game menu to play Survival or a quest for [crimson.land](https://crimson.land). The server
+replays every run before its score counts, and the game uploads finished runs by itself, so playing offline is fine.
+There is no sign-up: the game makes a key on its first launch, and the `identity` commands manage it:
+
+```bash
+crimson identity show             # your key and the fingerprint the boards show
+crimson identity export <file>    # copy your key, to play as you on another machine
+crimson identity import <file>    # sign as an exported key (--replace overwrites this one)
+crimson identity profile          # open your profile on crimson.land, signed in
+```
+
+## Custom quests
+
+Write a quest in the [quest language](https://crimson.banteg.xyz/formats/quest-dsl/), play it, and publish it with a
+completed ranked run to give it a page and leaderboard on [crimson.land/custom](https://crimson.land/custom):
+
+```bash
+crimson quest build <file>      # check a recipe and print its digest and entry budget
+crimson quest play <file>       # play it; every attempt saves a replay
+crimson quest publish <file>    # upload it with your newest clear
+```
+
+[crimson.land/custom/llm.txt](https://crimson.land/custom/llm.txt) is the whole language in one file, for writing
+quests with an LLM.
+
+## Tools
+
+```bash
+crimson quests <level>          # print a stock quest's spawn script
+crimson extract <game> <dst>    # extract the game's PAQ archives, with JAZ textures as PNG
+```
+
 ## More
 
 - [Changelog](https://github.com/banteg/crimson/blob/master/CHANGELOG.md)
@@ -92,4 +126,4 @@ crimson replay render <file>    # needs ffmpeg
 - [Telegram group](https://t.me/+pG-Ow90lt28zMWFi): chat, bug reports and runs
 
 This is an independent preservation and research project. The original Crimsonland Classic assets are distributed
-with permission from the original developer; the game code and the reimplementation are independent.
+with permission from 10tons; the game code and the reimplementation are independent.
