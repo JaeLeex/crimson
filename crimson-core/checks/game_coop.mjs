@@ -38,8 +38,9 @@
 //    Host cannot start before the Guest confirmed the last run's end, through a
 //    storm of the last run's packets, a hello before the partner connected, a
 //    start the Guest answers too late, a partner gone silent, one whose records
-//    stop coming, a transport that closes, an invalid record, an error while
-//    starting, a desync and different builds.
+//    stop coming, a peer that times out alone and connects again while its
+//    partner's session went on (then reloads), a transport that closes, an
+//    invalid record, an error while starting, a desync and different builds.
 // Corrupting each family of fields the hash covers changes it; every byte of the
 // run's state is in the hash or in the engine's list of what is left out and why
 // (game_coop_audit); the receive path tells stale records from invalid ones; a
@@ -61,6 +62,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
+import { Link, prng } from "./coop_link.mjs";
 import { CONFIG_BYTES, CORE, decode, field, init, INPUT_BYTES, names, record, state, step } from "./engine.mjs";
 import { loadGame } from "./game_compare.mjs";
 import { bootGame, sevenTunes } from "./game_host.mjs";
@@ -147,7 +149,6 @@ const ROLLBACK_COVERAGE = [
   "queued_commits",
   "unseen_bakes",
 ];
-const prng = (s) => () => ((s = (Math.imul(s ^ (s >>> 15), 0x2c1b3c6d) + 0x9e3779b9) | 0) >>> 0) / 2 ** 32;
 
 const plain = loadGame(wasm),
   solo = loadGame(wasm);
@@ -539,10 +540,10 @@ function prediction(run) {
   assert.ok(used().equals(unrequested(run.records[t])), "the record");
 }
 
-// (3): two peers, each a module playing its own seat, over a simulated pipe (the transport, client/web/coop.js):
-// channel 0 best effort, 40 ± 30 ms one way (reordering), 2 % loss and one burst of 12 packets in a row; channel 1
-// reliable and ordered over the same latency. One peer draws at 60 Hz, the other at 144 Hz with a 300 ms hitch,
-// each banking real time for its 60 ticks a second.
+// (3): two peers, each a module playing its own seat, over a simulated pipe (the transport, client/web/coop.js, as
+// coop_link.mjs plays it): channel 0 best effort, 40 ± 30 ms one way (reordering), 2 % loss and one burst of 12
+// packets in a row; channel 1 reliable and ordered over the same latency. One peer draws at 60 Hz, the other at
+// 144 Hz with a 300 ms hitch, each banking real time for its 60 ticks a second.
 // game_coop_status and game_coop_request (host/coop_wire.inc).
 const STATUS = {
   connected: 1,
@@ -556,6 +557,8 @@ const STATUS = {
   failed: 256,
   starting: 512,
   remote: 1024,
+  signed: 2048,
+  closed: 4096,
 };
 const REASON = {
   version: 1,
@@ -568,6 +571,7 @@ const REASON = {
   partnerLeft: 8,
   disconnected: 9,
   partnerGone: 10,
+  diverged: 11,
 };
 const reason = (status) => (status >>> 16) & 255;
 // Session timeouts (host/coop_wire.inc), and how long a leave may take to close both peers: the run to its end,
@@ -604,15 +608,15 @@ const pipeCoverage = Object.fromEntries(PIPE_COVERAGE.map((n) => [n, 0]));
 // The Host's module and the Guest's.
 let host, guest;
 
-class Pipe {
+class Pipe extends Link {
   // `stream` is what requests() gives, `truth` its oracle(); `swap` makes the Host the fast peer.
   constructor(stream, truth, mode, { swap = false, faults = true, seed = 1 } = {}) {
+    super(stream.run.records.length * 7 + mode.delay * 131 + mode.rmax + seed);
     if (!host) {
       [host, guest] = [loadGame(wasm), loadGame(wasm)];
       for (const g of [host, guest]) g.game_coop_states(1);
     }
     this.mode = mode;
-    this.random = prng(stream.run.records.length * 7 + mode.delay * 131 + mode.rmax + seed);
     const duration = stream.ticks * TICK_MS;
     this.peers = [host, guest].map((g, seat) => ({
       g,
@@ -634,10 +638,6 @@ class Pipe {
     this.hitch = faults ? { peer: fast, from: duration * 0.6, to: duration * 0.6 + 300 } : null;
     this.burst = faults ? { from: 1 - fast.seat, at: duration / 3, left: 12 } : null;
     this.loss = faults ? 0.02 : 0;
-    this.now = 0;
-    this.flights = [];
-    this.order = 0;
-    this.ordered = [0, 0];
     this.tap = null;
     this.drop = null; // (peer, channel, bytes) => true to lose what it sends
     this.alter = null; // (peer, channel, bytes) => what arrives instead
@@ -660,16 +660,7 @@ class Pipe {
       this.unheard[q.seat] = Math.max(this.unheard[q.seat], q.g.game_coop_confirmed() - hashAck(bytes));
     }
     if (this.drop?.(p, channel, bytes)) return;
-    if (this.alter) bytes = this.alter(p, channel, bytes);
-    let at = this.now + 10 + 60 * this.random();
-    if (channel === 0) {
-      const burst = this.burst;
-      if (burst?.from === p.seat && this.now >= burst.at && burst.left > 0) return void burst.left--;
-      if (this.random() < this.loss) return;
-    } else {
-      at = this.ordered[p.seat] = Math.max(at, this.ordered[p.seat]);
-    }
-    this.flights.push({ at, order: this.order++, to: this.peers[1 - p.seat], channel, bytes });
+    super.send(p, channel, this.alter ? this.alter(p, channel, bytes) : bytes);
   }
   // A message arriving at `p` now.
   receive(p, channel, bytes) {
@@ -767,40 +758,15 @@ class Pipe {
     while ((size = g.game_coop_tx(1, this.now))) this.send(p, 1, sent(size));
     p.at += p.frameMs;
   }
-  // Frames and arrivals in time order until `done`; a stutter holds its peer's frames and arrivals.
-  until(done, what, limit = 600000) {
-    const deadline = this.now + limit;
-    while (!done()) {
-      const hitch = this.hitch;
-      let next = null;
-      for (const f of this.flights) if (!next || f.at < next.at || (f.at === next.at && f.order < next.order)) next = f;
-      const p = this.peers.filter((q) => !q.gone).reduce((a, b) => (b.at < a.at ? b : a));
-      const arrival = next && next.at < p.at ? next : null;
-      const at = arrival ? arrival.at : p.at;
-      if (at > deadline) {
-        const state = this.peers.map((q) => ({
-          status: this.status(q).toString(16),
-          produced: q.g.game_coop_produced(),
-          remote: q.g.game_coop_remote(),
-          next: q.g.game_coop_next(),
-          confirmed: q.g.game_coop_confirmed(),
-          checked: stats(q.g).checked,
-        }));
-        assert.fail(`${what}: not by ${Math.round(this.now)} ms ${JSON.stringify(state)}`);
-      }
-      this.now = at;
-      if (hitch?.peer === (arrival ? arrival.to : p) && at >= hitch.from && at < hitch.to) {
-        if (arrival) arrival.at = hitch.to;
-        else p.at = hitch.to;
-        continue;
-      }
-      if (arrival) {
-        this.flights.splice(this.flights.indexOf(arrival), 1);
-        this.receive(arrival.to, arrival.channel, arrival.bytes);
-      } else {
-        this.frame(p);
-      }
-    }
+  describe() {
+    return this.peers.map((q) => ({
+      status: this.status(q).toString(16),
+      produced: q.g.game_coop_produced(),
+      remote: q.g.game_coop_remote(),
+      next: q.g.game_coop_next(),
+      confirmed: q.g.game_coop_confirmed(),
+      checked: stats(q.g).checked,
+    }));
   }
   // At `ms` from now, in one instant (both players pressing at once, say).
   after(ms, what, act) {
@@ -833,8 +799,10 @@ class Pipe {
     const { p, at } = this.leaver;
     const closed = () => this.peers.every((q) => !(this.status(q) & STATUS.connected));
     this.until(closed, "both close", at + late + CLOSE_MS - this.now);
-    for (const q of this.peers)
+    for (const q of this.peers) {
       assert.equal(reason(this.status(q)), q === p ? REASON.left : REASON.partnerLeft, `seat ${q.seat}: the reason`);
+      assert.ok(this.status(q) & STATUS.closed, `seat ${q.seat}: closed`);
+    }
   }
   // `p` closes `ms` after `since` (within `slack`), for `why`; its run then ends at its last confirmed tick, every
   // tick to it checked.
@@ -843,6 +811,7 @@ class Pipe {
     const late = this.now - (since + ms);
     assert.ok(late > 0 && late <= slack + 1e-6, `seat ${p.seat} closed ${Math.round(late)} ms off`);
     assert.equal(reason(this.status(p)), why, `seat ${p.seat}: the reason`);
+    assert.ok(this.status(p) & STATUS.closed, `seat ${p.seat}: closed`);
     this.endsAlone(p);
   }
   endsAlone(p) {
@@ -1157,6 +1126,50 @@ function pipeCases(stream, truth, short, shortTruth) {
     sim.dropped(h, REASON.silent, h.heardAt, LIVENESS_MS);
     lines.push(sim.report("silent", start));
   }
+  // The Guest's packets and messages stop reaching the Host mid-run while the Host's reach the Guest: the Host times
+  // out alone, and its transport connects its session again at once (as the page does, client/web/coop.js). The
+  // Guest's session, which went on, begins anew on the Host's hello: its run ends at its last confirmed tick, and the
+  // Host's next run (the short stream) starts on both and plays out. Then the Host's page reloads, a module that
+  // never played a run, and both connect again: the epochs go on from the Guest's, so the next run plays too.
+  {
+    const start = at(),
+      sim = new Pipe(stream, truth, mode, { seed: 19 });
+    const [h, g] = sim.peers;
+    sim.connect();
+    sim.start();
+    let cut = Infinity;
+    sim.after(third, "the cut", () => (cut = sim.now));
+    sim.drop = (p) => p === g && sim.now >= cut;
+    sim.until(() => sim.now >= cut && !sim.flights.some((f) => f.to === h), "the Guest's last packets");
+    sim.dropped(h, REASON.silent, h.heardAt, LIVENESS_MS);
+    const before = sim.status(g);
+    assert.ok(before & STATUS.connected && before & STATUS.started, `the Guest goes on: ${before.toString(16)}`);
+    cut = Infinity;
+    sim.connect([0]);
+    sim.until(() => sim.peers.every((p) => sim.status(p) & STATUS.connected), "both connect again", 1000);
+    sim.until(() => sim.status(g) & STATUS.ended, "the Guest's run ends", 1000);
+    const after = sim.status(g);
+    assert.equal(after & (STATUS.started | STATUS.closed | STATUS.leaving), 0, `the Guest: ${after.toString(16)}`);
+    assert.equal(reason(after), 0, "the Guest's reason");
+    const again = (what) => {
+      sim.start(short, shortTruth);
+      sim.until(() => sim.peers.every((p) => sim.status(p) & STATUS.started), what, START_MS);
+      sim.finish();
+      sim.ended(short.ticks - 1);
+    };
+    again("the next run starts");
+    // Each side's echoes of the other's packets measured the round trip across the sessions.
+    const restarted = sim.report("timeout alone", start);
+    assert.ok(restarted.rtt_ms.every((ms) => ms > 0), `round trips ${restarted.rtt_ms}`);
+    lines.push(restarted);
+    // The transport drops what the old page sent (client/web/coop.js's page filter).
+    sim.flights = sim.flights.filter((f) => f.to !== g);
+    h.g = loadGame(wasm);
+    h.g.game_coop_states(1);
+    sim.connect();
+    again("the run after the reload starts");
+    lines.push(sim.report("reload", start));
+  }
   // The Guest's ticks packets are lost for a second and its repairs never come: the Host closes on the progress
   // timeout, counted from the first packet past the gap, while the Guest's packets keep coming.
   {
@@ -1247,6 +1260,11 @@ function pipeCases(stream, truth, short, shortTruth) {
     for (const p of sim.peers) {
       const [tick, local, remote] = new Int32Array(p.g.memory.buffer, p.g.game_coop_desync(), 3);
       assert.ok(tick >= changed && local !== remote, `seat ${p.seat}: desync at ${tick}, changed at ${changed}`);
+      // The session ended, and says why.
+      const status = sim.status(p);
+      const closed = status & (STATUS.connected | STATUS.closed);
+      assert.equal(closed, STATUS.closed, `seat ${p.seat}: ${status.toString(16)}`);
+      assert.equal(reason(status), REASON.diverged, `seat ${p.seat}: the reason`);
     }
     lines.push(sim.report("desync", start));
   }

@@ -195,6 +195,7 @@ static struct {
   bool running; // a co-op tick runs
   bool quiet;   // the tick running ran before
   bool drawing; // the tick running draws
+  int draws;    // ticks that drew
   bool states;  // keep each tick's raw state digest (checks/game_coop.mjs)
   int baking;   // the tick running, once it baked
   CoopScreen screen;
@@ -213,7 +214,8 @@ static const int COOP_PRESENTATION[] = {
 #include "presentation.inc"
 };
 
-static void coop_stop() { coop.active = false; }
+// The run stops, and the session's with it (host/coop_wire.inc).
+static void coop_stop();
 
 static CoopScreen coop_screen() { return {game_state_pending, ui_elements_timeline, ui_transition_direction}; }
 static void coop_screen_install(const CoopScreen &screen) {
@@ -616,6 +618,13 @@ static bool coop_perk_valid() {
   return cfg.mode != GAME_MODE_RUSH && any_player_alive() && perk_pending_count > 0;
 }
 
+// The choices the open perk menu offers, as portable_step_many counts them.
+static int coop_offered() {
+  return player_state_table[0].perk_counts[PERK_ID_PERK_MASTER] > 0   ? 7
+         : player_state_table[0].perk_counts[PERK_ID_PERK_EXPERT] > 0 ? 6
+                                                                      : 5;
+}
+
 // The tick's perk command from the seats' requests, on the state it starts
 // from, as portable_step_many takes commands: with the menu closed, an open
 // request (player one's first) opens it and makes its player the picker; with
@@ -627,10 +636,7 @@ static uint32_t coop_command(const CoopInput *seats) {
   if (perk_menu_open) {
     coop.stats.dropped_opens += open[0] + open[1];
     int choice = seats[perk_picker].cmd - 1;
-    int offered = player_state_table[0].perk_counts[PERK_ID_PERK_MASTER] > 0   ? 7
-                  : player_state_table[0].perk_counts[PERK_ID_PERK_EXPERT] > 0 ? 6
-                                                                               : 5;
-    if (!valid || choice < 0 || choice >= offered || perk_choice_ids[choice] <= 0)
+    if (!valid || choice < 0 || choice >= coop_offered() || perk_choice_ids[choice] <= 0)
       return 0;
     coop.stats.extra_picks += choice >= 5;
     commands[0] = {1, choice};
@@ -720,8 +726,13 @@ static void coop_tick(int t, bool quiet, bool draw) {
   coop.running = true;
   coop.quiet = quiet;
   coop.drawing = draw;
+  coop.draws += draw;
   coop.baking = -1;
   bool accepted = portable_step_many(entry.commands);
+  // Inside the original the run's screen fades in by its ticks' time, as the
+  // client's runs' does (live_timeline): its HUD shows through it.
+  if (game_live)
+    live_timeline();
   coop.running = coop.quiet = false;
   grim_render_disabled = disabled;
   // Every tick draws its world, which bakes.
@@ -777,11 +788,24 @@ static void coop_release(int t) {
   for (; coop.hashes_from <= t; ++coop.hashes_from)
     coop.hashes.pop_front();
 }
+// A confirmed tick joins the recording of a run inside the original
+// (host/session.inc live.replay), as the verifier reads a 2-player run: both
+// players' inputs, then its command, whose player live.pickers names.
+static void coop_record(const CoopTick &entry) {
+  live_append(&entry.used[0].input, sizeof(PortableInput));
+  live_append(&entry.used[1].input, sizeof(PortableInput));
+  live_append(&entry.commands, sizeof entry.commands);
+  live_append(&entry.command, entry.commands * sizeof entry.command);
+  if (entry.commands)
+    live.pickers.push_back(entry.picker);
+}
 // A tick is confirmed once it ran on both seats' real records, as every tick
 // before it did. Between two peers its hash is kept from then on.
 static void coop_confirm() {
   while (coop.confirmed + 1 < coop.next && coop_final(coop.confirmed + 1)) {
     int t = ++coop.confirmed;
+    if (game_live)
+      coop_record(coop.ticks[t & (COOP_RING - 1)]);
     if (coop.local < 0)
       continue;
     coop.hashes.push_back({coop.ticks[t & (COOP_RING - 1)].hash, false, -INFINITY});
@@ -951,9 +975,12 @@ __attribute__((export_name("game_coop_input"))) uintptr_t game_coop_input() {
 // behind acknowledging them, the session holds production or this machine's
 // perk request waits for its tick's confirmation. A peer's record asks for
 // the menu when game_coop_request did; the picker's, on the tick after its
-// request opened the menu, takes the choice its input names (0 cancels).
+// request opened the menu, takes the choice its input names (0 cancels). A
+// pause holds back the players' input but not the picker's choice, which the
+// run waits on: a leave that follows ends the run after it.
 __attribute__((export_name("game_coop_produce"))) int game_coop_produce(double) {
-  if (!coop.active || coop.hold || coop.request >= 0 || coop.produced >= coop.next + coop.delay ||
+  uint32_t hold = coop.picking ? coop.hold & ~COOP_HOLD_PAUSE : coop.hold;
+  if (!coop.active || hold || coop.request >= 0 || coop.produced >= coop.next + coop.delay ||
       coop.produced - coop.peer_ack >= COOP_UNACKED)
     return -1;
   int t = coop.produced + 1;
