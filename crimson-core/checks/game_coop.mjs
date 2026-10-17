@@ -21,10 +21,29 @@
 //    menu, to each tick where the effect overflow's entries in use change, and
 //    every so often anywhere. Each tick, once confirmed, has the hash, bake,
 //    terrain and music digests and raw state of (1), and no tick ran on a record
-//    not yet real further past the last confirmed one than the window allows.
+//    not yet real further past the last confirmed one than the window allows;
+// 3. between two peers, each a module playing its own seat through the wire
+//    protocol (host/coop_wire.inc), over a simulated pipe with latency, jitter,
+//    loss, a burst of lost packets, a stutter and different frame rates: the
+//    Host starts the run, each peer produces its seat's records (opens when its
+//    state allows them, its picks when it is the picker) and both play the
+//    whole stream in lockstep and with a window of 8, at delays 2 and 4, and
+//    with a window of 8 at delay 8. On both, each tick once confirmed has the
+//    digests and raw state of (1) and the partner's hash compared; both end on
+//    the same tick in the same state, neither sending more than 60 ticks
+//    packets a second. Then the session's cases: pause races, leaving mid-run,
+//    while paused, from an open perk menu, while a request waits and while the
+//    leaver's last acknowledgements are lost (each closing promptly, for the
+//    reason it left), hashes held back past the engine's ring, a rematch the
+//    Host cannot start before the Guest confirmed the last run's end, through a
+//    storm of the last run's packets, a hello before the partner connected, a
+//    start the Guest answers too late, a partner gone silent, one whose records
+//    stop coming, a transport that closes, an invalid record, an error while
+//    starting, a desync and different builds.
 // Corrupting each family of fields the hash covers changes it; every byte of the
 // run's state is in the hash or in the engine's list of what is left out and why
-// (game_coop_audit); the receive path tells stale records from invalid ones; and
+// (game_coop_audit); the receive path tells stale records from invalid ones; a
+// guess drops the presses of the record it copies; and
 // the corpus covers what the engine must get right: both players opening, late
 // and picking, same-tick and dropped requests, a survivor's menu, a sixth and a
 // seventh choice and one past those offered, rollbacks into an open menu and
@@ -42,7 +61,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
-import { CORE, decode, field, init, INPUT_BYTES, names, record, state, step } from "./engine.mjs";
+import { CONFIG_BYTES, CORE, decode, field, init, INPUT_BYTES, names, record, state, step } from "./engine.mjs";
 import { loadGame } from "./game_compare.mjs";
 import { bootGame, sevenTunes } from "./game_host.mjs";
 
@@ -106,6 +125,8 @@ const STATS = [
   "queued_commits",
   "unseen_bakes",
   "slot_bytes",
+  "max_lead",
+  "checked",
 ];
 const stats = (g) => {
   const words = new Int32Array(g.memory.buffer, g.game_coop_stats(), STATS.length);
@@ -483,6 +504,768 @@ function receive(run) {
   assert.equal(deliver(1, 2, 1), 0, "a confirmed tick's record again");
 }
 
+// A guess (host/coop.inc coop_record) for a record not yet arrived keeps the partner's last real one's axes, aim and
+// held keys, but not its presses or its request; one that arrived out of order, past it, plays no part. The real
+// record, once it comes, puts the tick right.
+function prediction(run) {
+  const PRESSES = 2 | 4,
+    t = 10;
+  init(solo, run.config);
+  assert.equal(solo.game_coop_start(0, 2, 8, 1), 1);
+  for (let s = 0; s < 2; s++)
+    for (const seat of [0, 1]) write(solo, solo.game_coop_seed(seat, s), run.records[s], seat, 0);
+  const take = (s, r = run.records[s], request = 0) => {
+    write(solo, solo.game_coop_input_for(1), r, 1, request);
+    assert.equal(solo.game_coop_deliver(1, s, 1), 1);
+  };
+  const last = Buffer.from(run.records[t - 1]);
+  last.writeUInt32LE(last.readUInt32LE(INPUT_BYTES + 16) | PRESSES, INPUT_BYTES + 16);
+  for (let s = 2; s < t - 1; s++) take(s);
+  take(t - 1, last, OPEN);
+  take(t + 1, run.records[t + 1], OPEN);
+  for (let s = 2; s <= t; s++) {
+    write(solo, solo.game_coop_input(), run.records[s], 0, 0);
+    while (solo.game_coop_produce(0) < 0) solo.game_coop_advance(1, 0);
+  }
+  solo.game_coop_advance(t, 0);
+  assert.equal(solo.game_coop_next(), t + 1);
+  const used = () => Buffer.from(new Uint8Array(solo.memory.buffer, solo.game_coop_used(t, 1), INPUT_BYTES + 1));
+  const unrequested = (r) => Buffer.concat([r.subarray(INPUT_BYTES, 2 * INPUT_BYTES), Buffer.from([0])]);
+  const guess = unrequested(last);
+  guess.writeUInt32LE(last.readUInt32LE(INPUT_BYTES + 16) & ~PRESSES, 16);
+  assert.ok(used().equals(guess), "the guess");
+  take(t);
+  solo.game_coop_advance(1, 0);
+  assert.ok(used().equals(unrequested(run.records[t])), "the record");
+}
+
+// (3): two peers, each a module playing its own seat, over a simulated pipe (the transport, client/web/coop.js):
+// channel 0 best effort, 40 ± 30 ms one way (reordering), 2 % loss and one burst of 12 packets in a row; channel 1
+// reliable and ordered over the same latency. One peer draws at 60 Hz, the other at 144 Hz with a 300 ms hitch,
+// each banking real time for its 60 ticks a second.
+// game_coop_status and game_coop_request (host/coop_wire.inc).
+const STATUS = {
+  connected: 1,
+  started: 2,
+  paused: 4,
+  waiting: 8,
+  picker: 16,
+  leaving: 32,
+  ended: 64,
+  desynced: 128,
+  failed: 256,
+  starting: 512,
+  remote: 1024,
+};
+const REASON = {
+  version: 1,
+  badRecord: 2,
+  badMessage: 3,
+  stalled: 4,
+  silent: 5,
+  unanswered: 6,
+  left: 7,
+  partnerLeft: 8,
+  disconnected: 9,
+  partnerGone: 10,
+};
+const reason = (status) => (status >>> 16) & 255;
+// Session timeouts (host/coop_wire.inc), and how long a leave may take to close both peers: the run to its end,
+// and the last records and hashes each way.
+const PROGRESS_MS = 5000,
+  LIVENESS_MS = 15000,
+  START_MS = 10000,
+  CLOSE_MS = 2000;
+const ASK = { open: 1, pause: 2, leave: 3, nextRun: 4, start: 5 };
+const TICK_MS = 1000 / 60;
+// The ticks whose results the engine keeps (host/coop.inc COOP_RING), and the most by which a peer's partner may
+// trail its confirmed ticks hearing their hashes over the plain pipe: a second.
+const RING = 256,
+  UNHEARD = 60;
+// A ticks packet's hash_ack (host/coop_wire.inc), -1 none.
+const hashAck = (bytes) => new DataView(bytes.buffer, bytes.byteOffset).getInt32(32, true);
+// A ticks packet without its hashes.
+const bare = (bytes) => {
+  const kept = bytes.slice(0, bytes.length - 4 * bytes[3]);
+  kept[3] = 0;
+  return kept;
+};
+// The pipe's runs: lockstep and M2's window, each at two delays, and the longest delay with that window; every
+// other one swaps which peer draws fast, stutters and loses the burst.
+const PIPE_MODES = [
+  { delay: 2, rmax: 0 },
+  { delay: 2, rmax: 8 },
+  { delay: 4, rmax: 0 },
+  { delay: 4, rmax: 8 },
+  { delay: 8, rmax: 8 },
+];
+const PIPE_COVERAGE = ["repairs", "mispredictions", "opens_one", "opens_two", "picker_waits_one", "picker_waits_two"];
+const pipeCoverage = Object.fromEntries(PIPE_COVERAGE.map((n) => [n, 0]));
+// The Host's module and the Guest's.
+let host, guest;
+
+class Pipe {
+  // `stream` is what requests() gives, `truth` its oracle(); `swap` makes the Host the fast peer.
+  constructor(stream, truth, mode, { swap = false, faults = true, seed = 1 } = {}) {
+    if (!host) {
+      [host, guest] = [loadGame(wasm), loadGame(wasm)];
+      for (const g of [host, guest]) g.game_coop_states(1);
+    }
+    this.mode = mode;
+    this.random = prng(stream.run.records.length * 7 + mode.delay * 131 + mode.rmax + seed);
+    const duration = stream.ticks * TICK_MS;
+    this.peers = [host, guest].map((g, seat) => ({
+      g,
+      seat,
+      frameMs: (seat === 1) !== swap ? 1000 / 144 : 1000 / 60,
+      at: seat * 3,
+      last: 0,
+      bank: 0,
+      seen: -1,
+      stream: null,
+      truth: null,
+      run: 0,
+      connectedAt: null,
+      heardAt: 0, // the last arrival
+      gone: false, // neither frames nor takes arrivals
+      stalled: false, // frames, sends and takes arrivals, but runs no tick
+    }));
+    const fast = this.peers.find((p) => p.frameMs < 10);
+    this.hitch = faults ? { peer: fast, from: duration * 0.6, to: duration * 0.6 + 300 } : null;
+    this.burst = faults ? { from: 1 - fast.seat, at: duration / 3, left: 12 } : null;
+    this.loss = faults ? 0.02 : 0;
+    this.now = 0;
+    this.flights = [];
+    this.order = 0;
+    this.ordered = [0, 0];
+    this.tap = null;
+    this.drop = null; // (peer, channel, bytes) => true to lose what it sends
+    this.alter = null; // (peer, channel, bytes) => what arrives instead
+    this.hooks = {};
+    this.leaver = null;
+    this.stream = stream;
+    this.truth = truth;
+    this.upcoming = null;
+    this.runs = 0;
+    this.checking = true;
+    this.unheard = [0, 0]; // the most each peer's confirmed ticks ran ahead of its partner's hash_ack
+  }
+  status(p) {
+    return p.g.game_coop_status();
+  }
+  send(p, channel, bytes) {
+    this.tap?.(p, channel, bytes);
+    if (channel === 0 && this.peers.every((q) => this.status(q) & STATUS.started)) {
+      const q = this.peers[1 - p.seat];
+      this.unheard[q.seat] = Math.max(this.unheard[q.seat], q.g.game_coop_confirmed() - hashAck(bytes));
+    }
+    if (this.drop?.(p, channel, bytes)) return;
+    if (this.alter) bytes = this.alter(p, channel, bytes);
+    let at = this.now + 10 + 60 * this.random();
+    if (channel === 0) {
+      const burst = this.burst;
+      if (burst?.from === p.seat && this.now >= burst.at && burst.left > 0) return void burst.left--;
+      if (this.random() < this.loss) return;
+    } else {
+      at = this.ordered[p.seat] = Math.max(at, this.ordered[p.seat]);
+    }
+    this.flights.push({ at, order: this.order++, to: this.peers[1 - p.seat], channel, bytes });
+  }
+  // A message arriving at `p` now.
+  receive(p, channel, bytes) {
+    if (p.gone) return;
+    const at = p.g.game_coop_rx(bytes.length);
+    new Uint8Array(p.g.memory.buffer, at, bytes.length).set(bytes);
+    p.g.game_coop_receive(channel, bytes.length, this.now);
+    p.heardAt = this.now;
+    this.hooks.received?.(p, channel, bytes);
+    this.seed(p);
+  }
+  connect(seats = [0, 1]) {
+    for (const seat of seats) {
+      const p = this.peers[seat];
+      assert.equal(p.g.game_coop_connect(seat, this.now), 1);
+      p.connectedAt = this.now;
+    }
+  }
+  // The Host starts a run of `stream` once it can; each peer seeds its first ticks from the stream as it starts.
+  start(stream = this.stream, truth = this.truth) {
+    this.upcoming = { stream, truth, run: ++this.runs };
+    const [h] = this.peers;
+    this.until(() => {
+      if (!(this.status(h) & STATUS.connected)) return false;
+      const config = stream.run.config.subarray(0, CONFIG_BYTES);
+      new Uint8Array(h.g.memory.buffer, h.g.portable_config(), CONFIG_BYTES).set(config);
+      return h.g.game_coop_request(ASK.start, this.mode.delay, this.mode.rmax, 0, this.now) === 1;
+    }, "the Host starts the run");
+    this.stream = stream;
+    this.truth = truth;
+    this.seed(h);
+  }
+  seed(p) {
+    const { delay } = this.mode;
+    if (!this.upcoming || p.run === this.upcoming.run || !(this.status(p) & (STATUS.started | STATUS.starting)))
+      return;
+    if (p.g.game_coop_next() !== 0 || p.g.game_coop_produced() !== delay - 1) return;
+    const { run, cmd } = this.upcoming.stream;
+    for (let t = 0; t < delay; t++)
+      for (const seat of [0, 1]) write(p.g, p.g.game_coop_seed(seat, t), run.records[t], seat, cmd[t][seat]);
+    Object.assign(p, { stream: this.upcoming.stream, truth: this.upcoming.truth, run: this.upcoming.run, seen: -1 });
+  }
+  // This peer's records for the ticks its engine takes: an open waits until the state it is judged on is final,
+  // and the picker's choice goes on the tick after its open.
+  feed(p) {
+    if (!p.stream) return;
+    const { g, seat } = p;
+    const { run, cmd } = p.stream;
+    for (;;) {
+      const t = g.game_coop_produced() + 1,
+        status = this.status(p);
+      const held = status & (STATUS.paused | STATUS.leaving);
+      if (t >= run.records.length || !(status & STATUS.started) || held) return;
+      const nibble = cmd[t][seat];
+      if (status & STATUS.picker) assert.ok(nibble < OPEN, `tick ${t}: the picker opens the menu again`);
+      else if (nibble === OPEN) {
+        if (!(status & STATUS.waiting)) {
+          if (g.game_coop_next() !== t || g.game_coop_confirmed() !== t - 1) return;
+          g.game_coop_request(ASK.open, 0, 0, 0, this.now);
+        }
+      } else if (status & STATUS.waiting) return;
+      else assert.equal(nibble, 0, `tick ${t}: seat ${seat} picks with no menu of its own`);
+      write(g, g.game_coop_input(), run.records[t], seat, nibble);
+      if (g.game_coop_produce(this.now) < 0) return;
+    }
+  }
+  // Each tick, once confirmed, has the oracle's hash, bake, terrain and music digests and raw state.
+  check(p) {
+    const { g } = p;
+    const confirmed = g.game_coop_confirmed();
+    assert.ok(g.game_coop_next() - (confirmed + 1) <= LEAD, "ran past the lead");
+    for (let t = p.seen + 1; t <= confirmed; t++) {
+      const actual = digests(g, t);
+      const expected = p.truth.expected[t];
+      DIGESTS.forEach((name, i) => assert.equal(actual[i], expected[i], `seat ${p.seat} tick ${t}: ${name}`));
+    }
+    p.seen = Math.max(p.seen, confirmed);
+  }
+  frame(p) {
+    const { g } = p;
+    p.bank += Math.min(this.now - p.last, 100);
+    p.last = this.now;
+    this.hooks.frame?.(p);
+    this.feed(p);
+    const budget = p.stalled ? 0 : Math.floor(p.bank / TICK_MS),
+      ran = g.game_coop_advance(budget, this.now);
+    p.bank -= ran * TICK_MS;
+    if (ran < budget) p.bank = Math.min(p.bank, 4 * TICK_MS);
+    if (p.stream && this.checking) this.check(p);
+    this.hooks.advanced?.(p);
+    this.feed(p);
+    const sent = (size) => new Uint8Array(g.memory.buffer, g.game_coop_tx_buffer(), size).slice();
+    let size = g.game_coop_tx(0, this.now);
+    if (size) this.send(p, 0, sent(size));
+    while ((size = g.game_coop_tx(1, this.now))) this.send(p, 1, sent(size));
+    p.at += p.frameMs;
+  }
+  // Frames and arrivals in time order until `done`; a stutter holds its peer's frames and arrivals.
+  until(done, what, limit = 600000) {
+    const deadline = this.now + limit;
+    while (!done()) {
+      const hitch = this.hitch;
+      let next = null;
+      for (const f of this.flights) if (!next || f.at < next.at || (f.at === next.at && f.order < next.order)) next = f;
+      const p = this.peers.filter((q) => !q.gone).reduce((a, b) => (b.at < a.at ? b : a));
+      const arrival = next && next.at < p.at ? next : null;
+      const at = arrival ? arrival.at : p.at;
+      if (at > deadline) {
+        const state = this.peers.map((q) => ({
+          status: this.status(q).toString(16),
+          produced: q.g.game_coop_produced(),
+          remote: q.g.game_coop_remote(),
+          next: q.g.game_coop_next(),
+          confirmed: q.g.game_coop_confirmed(),
+          checked: stats(q.g).checked,
+        }));
+        assert.fail(`${what}: not by ${Math.round(this.now)} ms ${JSON.stringify(state)}`);
+      }
+      this.now = at;
+      if (hitch?.peer === (arrival ? arrival.to : p) && at >= hitch.from && at < hitch.to) {
+        if (arrival) arrival.at = hitch.to;
+        else p.at = hitch.to;
+        continue;
+      }
+      if (arrival) {
+        this.flights.splice(this.flights.indexOf(arrival), 1);
+        this.receive(arrival.to, arrival.channel, arrival.bytes);
+      } else {
+        this.frame(p);
+      }
+    }
+  }
+  // At `ms` from now, in one instant (both players pressing at once, say).
+  after(ms, what, act) {
+    const at = this.now + ms;
+    this.until(() => this.now >= at, what);
+    act();
+  }
+  // Until the run is over on both sides, ending it there once both produced the whole stream; then the Host leaves
+  // and both close.
+  finish() {
+    const records = this.stream.run.records.length;
+    const ended = (p) => this.status(p) & STATUS.ended;
+    this.until(
+      () => this.peers.every(ended) || this.peers.every((p) => p.g.game_coop_produced() === records - 1),
+      "the stream played",
+    );
+    for (const p of this.peers) {
+      const status = this.status(p);
+      assert.equal(status & ~0xffff, 0, `seat ${p.seat} stopped: status ${status.toString(16)}`);
+    }
+    this.leave(this.peers[0]);
+    this.close();
+  }
+  leave(p) {
+    assert.equal(p.g.game_coop_request(ASK.leave, 0, 0, 0, this.now), 1);
+    this.leaver = { p, at: this.now };
+  }
+  // Both close soon after the leave (`late` ms more), the leaver for leaving and its partner for the partner's leave.
+  close(late = 0) {
+    const { p, at } = this.leaver;
+    const closed = () => this.peers.every((q) => !(this.status(q) & STATUS.connected));
+    this.until(closed, "both close", at + late + CLOSE_MS - this.now);
+    for (const q of this.peers)
+      assert.equal(reason(this.status(q)), q === p ? REASON.left : REASON.partnerLeft, `seat ${q.seat}: the reason`);
+  }
+  // `p` closes `ms` after `since` (within `slack`), for `why`; its run then ends at its last confirmed tick, every
+  // tick to it checked.
+  dropped(p, why, since, ms, slack = p.frameMs) {
+    this.until(() => !(this.status(p) & STATUS.connected), `seat ${p.seat} closes`, since + ms + 1000 - this.now);
+    const late = this.now - (since + ms);
+    assert.ok(late > 0 && late <= slack + 1e-6, `seat ${p.seat} closed ${Math.round(late)} ms off`);
+    assert.equal(reason(this.status(p)), why, `seat ${p.seat}: the reason`);
+    this.endsAlone(p);
+  }
+  endsAlone(p) {
+    this.until(() => this.status(p) & STATUS.ended, `seat ${p.seat}: the run ends`, 1000);
+    const status = this.status(p);
+    assert.equal(status & (STATUS.desynced | STATUS.failed), 0, `seat ${p.seat}: status ${status.toString(16)}`);
+    const confirmed = p.g.game_coop_confirmed();
+    assert.equal(p.g.game_coop_next(), confirmed + 1, `seat ${p.seat}: the last tick`);
+    assert.equal(p.seen, confirmed, `seat ${p.seat}: ticks checked`);
+  }
+  // Both ended on the same tick, every tick to it confirmed and checked, in the same state; `end` the last tick.
+  ended(end) {
+    const [a, b] = this.peers;
+    const compared = () => this.peers.every((p) => stats(p.g).checked === end + 1);
+    this.until(compared, "every tick's hash compared", 2000);
+    for (const p of this.peers) {
+      const status = this.status(p);
+      const clean = status & STATUS.ended && !(status & (STATUS.desynced | STATUS.failed));
+      assert.ok(clean, `seat ${p.seat}: status ${status.toString(16)}`);
+      assert.equal(p.g.game_coop_next(), end + 1, `seat ${p.seat}: the last tick`);
+      assert.equal(p.seen, end, `seat ${p.seat}: ticks checked`);
+      const result = stats(p.g);
+      const lead = result.guessed_lead;
+      assert.ok(lead <= this.mode.rmax, `a tick ran on a guess ${lead} past the confirmed one`);
+    }
+    assert.ok(canonical(a.g).equals(canonical(b.g)), "the peers' states part at the end");
+  }
+  report(name, at) {
+    const [a, b] = this.peers.map((p) => stats(p.g));
+    const both = (n) => a[n] + b[n];
+    const wire = (s) => {
+      const words = new Int32Array(s.g.memory.buffer, s.g.game_coop_stats() + STATS.length * 4, WIRE.length);
+      return Object.fromEntries(WIRE.map((n, i) => [n, words[i]]));
+    };
+    const [wa, wb] = this.peers.map(wire);
+    // At most 60 ticks packets a second (one on connecting).
+    for (const [p, w] of [
+      [this.peers[0], wa],
+      [this.peers[1], wb],
+    ])
+      if (p.connectedAt !== null) {
+        const most = 1 + (60 * (this.now - p.connectedAt)) / 1000;
+        assert.ok(w.sent <= most + 1e-6, `seat ${p.seat} sent ${w.sent} ticks packets, at most ${Math.floor(most)}`);
+      }
+    // Each peer guesses and mispredicts its partner's seat.
+    const counts = { repairs: wa.repairs + wb.repairs, mispredictions: a.mispredictions_two + b.mispredictions_one };
+    for (const name of PIPE_COVERAGE) pipeCoverage[name] += counts[name] ?? both(name);
+    return {
+      pipe: name,
+      stream: this.stream.label,
+      delay: this.mode.delay,
+      rmax: this.mode.rmax,
+      ticks: this.peers[0].g.game_coop_next(),
+      rollbacks: [a.rollbacks, b.rollbacks],
+      max_depth: Math.max(a.max_depth, b.max_depth),
+      max_lead: Math.max(a.max_lead, b.max_lead),
+      stalls: [a.stalls, b.stalls],
+      repairs: [wa.repairs, wb.repairs],
+      rtt_ms: [wa.rtt_ms, wb.rtt_ms],
+      lost: [wa.lost, wb.lost],
+      stale: [wa.stale, wb.stale],
+      unheard: this.unheard,
+      ms: Math.round(performance.now() - at),
+    };
+  }
+}
+// CoopWireStats, after CoopStats (host/coop.inc).
+const WIRE = ["sent", "received", "lost", "stale", "repairs", "repaired", "rtt_ms"];
+
+// The whole stream between the peers.
+function pipe(stream, truth, mode, swap) {
+  const at = performance.now();
+  const sim = new Pipe(stream, truth, mode, { swap });
+  sim.connect();
+  sim.start();
+  sim.finish();
+  sim.ended(stream.ticks - 1);
+  const most = Math.max(...sim.unheard);
+  assert.ok(most <= UNHEARD, `${stream.label} at ${JSON.stringify(mode)}: a hash went ${most} ticks unheard`);
+  return sim.report("stream", at);
+}
+
+// The session's cases, on a stream with perk menus (`stream`) and a short one that ends by itself (`short`).
+function pipeCases(stream, truth, short, shortTruth) {
+  const lines = [];
+  const mode = { delay: 2, rmax: 8 };
+  const at = () => performance.now();
+  const third = (stream.ticks * TICK_MS) / 3;
+  const statusOf = (sim, p) => sim.status(p);
+  const produced = (sim) => sim.peers.map((p) => p.g.game_coop_produced());
+  const endTick = (sim) => sim.peers[0].g.game_coop_next() - 1;
+  // Pause races: both press pause in the same instant (a tie, the Host's wins), hold it past the progress timeout,
+  // then the Host resumes as the Guest presses pause again: the Host's resume wins on both.
+  {
+    const start = at(),
+      sim = new Pipe(stream, truth, mode, { seed: 2 });
+    sim.connect();
+    sim.start();
+    sim.after(third, "the pause", () => {
+      for (const p of sim.peers) assert.equal(p.g.game_coop_request(ASK.pause, 1, 0, 0, sim.now), 1);
+    });
+    sim.after(1000, "the pause holds", () => {});
+    const held = produced(sim);
+    for (const p of sim.peers) assert.ok(statusOf(sim, p) & STATUS.paused, `seat ${p.seat} paused`);
+    sim.after(5500, "a long pause", () => {
+      assert.deepEqual(produced(sim), held, "records produced while paused");
+      assert.equal(sim.peers[0].g.game_coop_request(ASK.pause, 0, 0, 0, sim.now), 1);
+      assert.equal(sim.peers[1].g.game_coop_request(ASK.pause, 1, 0, 0, sim.now), 1);
+    });
+    sim.after(500, "the resume", () => {});
+    for (const p of sim.peers) assert.ok(!(statusOf(sim, p) & STATUS.paused), `seat ${p.seat} resumed`);
+    sim.finish();
+    sim.ended(stream.ticks - 1);
+    lines.push(sim.report("pause race", start));
+  }
+  // Leaving: mid-run (the leaver running no tick for a while after, which the partner waits for to compare the last
+  // ticks' hashes before it closes), while paused, from an open perk menu (its picker), and while a request waits
+  // (its partner).
+  const leaving = (name, seed, act, late = 0) => {
+    const start = at(),
+      sim = new Pipe(stream, truth, mode, { seed });
+    sim.connect();
+    sim.start();
+    const check = act(sim);
+    sim.close(late);
+    check?.();
+    const end = endTick(sim);
+    assert.ok(end < stream.ticks - 1, `${name}: the run ended where it would anyway`);
+    sim.ended(end);
+    lines.push(sim.report(name, start));
+  };
+  const STALL_MS = 1500;
+  leaving(
+    "leave",
+    3,
+    (sim) => {
+      const g = sim.peers[1];
+      sim.after(third, "the leave", () => {
+        sim.leave(g);
+        g.stalled = true;
+      });
+      sim.after(STALL_MS, "the leaver runs again", () => (g.stalled = false));
+    },
+    STALL_MS,
+  );
+  leaving("leave paused", 4, (sim) => {
+    sim.after(third, "the pause", () => sim.peers[0].g.game_coop_request(ASK.pause, 1, 0, 0, sim.now));
+    sim.after(1500, "the leave", () => sim.leave(sim.peers[0]));
+  });
+  const leaveOn = (flag, who) => (sim) => {
+    let left = false;
+    sim.hooks.advanced = (p) => {
+      if (!left && sim.status(p) & flag) {
+        sim.leave(who(sim, p));
+        left = true;
+      }
+    };
+    sim.until(() => left, "a perk menu");
+  };
+  leaving("leave picking", 5, leaveOn(STATUS.picker, (sim, p) => p));
+  leaving("leave requested", 6, leaveOn(STATUS.waiting, (sim, p) => sim.peers[1 - p.seat]));
+  // The Host leaves and the Guest's hashes stop for a while, so the Guest holds the Host's through the run's end
+  // before the Host holds the Guest's; then the Host's ticks packets, which would acknowledge them, are lost for longer
+  // than a peer used to wait before it closed: the Guest closes for the Host's leave all the same.
+  const LOST_MS = 1200;
+  leaving(
+    "leave unacknowledged",
+    17,
+    (sim) => {
+      const [h, g] = sim.peers;
+      let left = Infinity,
+        lost = 0;
+      const within = (from, ms) => sim.now >= from && sim.now < from + ms;
+      sim.alter = (p, channel, bytes) => (p === g && channel === 0 && within(left, STALL_MS) ? bare(bytes) : bytes);
+      sim.drop = (p, channel) => p === h && channel === 0 && within(left + STALL_MS, LOST_MS) && ++lost > 0;
+      sim.after(third, "the leave", () => {
+        sim.leave(h);
+        left = sim.now;
+      });
+      return () => assert.ok(lost > 0, "no acknowledgement lost");
+    },
+    STALL_MS,
+  );
+  // The Guest's ticks packets carry no hashes for longer than the engine keeps a tick's results: both peers keep
+  // every hash the other lacks or has not had compared, and every tick's is compared by the end.
+  {
+    const start = at(),
+      sim = new Pipe(stream, truth, mode, { seed: 18 });
+    const g = sim.peers[1];
+    sim.connect();
+    sim.start();
+    let from = Infinity;
+    sim.after(third, "the hashes held back", () => (from = sim.now));
+    const held = () => sim.now >= from && sim.now < from + (RING * 3 * TICK_MS) / 2;
+    sim.alter = (p, channel, bytes) => (p === g && channel === 0 && held() ? bare(bytes) : bytes);
+    sim.finish();
+    sim.ended(stream.ticks - 1);
+    assert.ok(sim.unheard[1] > RING, `the Guest's hashes went at most ${sim.unheard[1]} ticks unheard`);
+    lines.push(sim.report("hashes held back", start));
+  }
+  // A rematch: the short stream, paused once, plays to its end; the Host cannot start another run mid-run, nor once
+  // its own run ended until the Guest confirmed the end (the Guest running no tick a while once it produced its last
+  // record). The Guest asks for the same run again and the Host starts it, while every packet and message of the
+  // first run arrives again at random: none counts.
+  {
+    const start = at(),
+      sim = new Pipe(short, shortTruth, mode, { seed: 7 });
+    const first = [];
+    sim.tap = (p, channel, bytes) => first.push({ to: sim.peers[1 - p.seat], channel, bytes });
+    sim.connect();
+    sim.start();
+    const [h, g] = sim.peers;
+    const startHost = () => h.g.game_coop_request(ASK.start, mode.delay, mode.rmax, 0, sim.now);
+    const pause = (paused) => () => assert.equal(g.g.game_coop_request(ASK.pause, paused, 0, 0, sim.now), 1);
+    sim.after((short.ticks * TICK_MS) / 2, "the pause", () => {
+      assert.equal(startHost(), 0, "a run started mid-run");
+      pause(1)();
+    });
+    sim.after(300, "the resume", pause(0));
+    let stalled = null,
+      refused = 0;
+    sim.hooks.advanced = (p) => {
+      if (p === g && stalled === null && g.g.game_coop_produced() >= short.ticks - 1) {
+        stalled = sim.now;
+        g.stalled = true;
+      }
+      if (stalled !== null && sim.now >= stalled + 400) g.stalled = false;
+      if (p !== h || !g.stalled || !(sim.status(h) & STATUS.ended)) return;
+      assert.equal(startHost(), 0, "a run started before the Guest confirmed the last");
+      refused++;
+    };
+    sim.until(() => sim.peers.every((p) => sim.status(p) & STATUS.ended), "the first run ends");
+    sim.ended(short.ticks - 1);
+    assert.ok(refused > 0, "the Host never asked before the Guest's end");
+    sim.hooks.advanced = null;
+    assert.equal(g.g.game_coop_request(ASK.nextRun, 0, 0, 0, sim.now), 1);
+    sim.until(() => sim.status(h) >>> 24 === 1, "the Host hears the Guest's choice");
+    sim.tap = null;
+    sim.start(stream, truth);
+    assert.equal(g.g.game_coop_confirmed(), short.ticks - 1, "the Guest's last run when the next started");
+    sim.hooks.frame = (p) => {
+      for (let i = 0; i < 2; i++) {
+        const old = first[Math.floor(sim.random() * first.length)];
+        if (old.to === p) sim.receive(p, old.channel, old.bytes);
+      }
+      const status = sim.status(p);
+      assert.ok(!(status & STATUS.paused), "a pause of the first run");
+      assert.equal(status >>> 24, 0, "a choice of the first run");
+    };
+    sim.finish();
+    sim.ended(stream.ticks - 1);
+    const line = sim.report("rematch", start);
+    assert.ok(line.stale.every((n) => n > 0), "no stale packets");
+    lines.push(line);
+  }
+  // The Host's hello reaches the Guest before the Guest connects: the Guest's answers it, and the run plays.
+  {
+    const start = at(),
+      sim = new Pipe(short, shortTruth, mode, { seed: 11 });
+    const g = sim.peers[1];
+    sim.connect([0]);
+    let early = 0;
+    sim.hooks.received = (p) => (early += p === g && p.connectedAt === null);
+    sim.until(() => early > 0, "the Host's hello");
+    sim.hooks.received = null;
+    sim.connect([1]);
+    sim.until(() => sim.peers.every((p) => sim.status(p) & STATUS.connected), "both connect", 1000);
+    sim.start();
+    sim.finish();
+    sim.ended(short.ticks - 1);
+    lines.push(sim.report("hello first", start));
+  }
+  // The Guest's frames and arrivals stop for longer than the start timeout from the Host's start: the Host gives up
+  // after it and tells the Guest, which stops the run it then starts; both can start the next, for no old reason.
+  {
+    const start = at(),
+      sim = new Pipe(short, shortTruth, mode, { seed: 12 });
+    const [h, g] = sim.peers;
+    sim.connect();
+    sim.start();
+    const asked = sim.now,
+      faults = sim.hitch;
+    sim.hitch = { peer: g, from: asked, to: asked + START_MS + 1000 };
+    sim.until(() => !(sim.status(h) & STATUS.starting), "the Host gives up", START_MS + 1000);
+    const late = sim.now - asked - START_MS;
+    assert.ok(late > 0 && late <= h.frameMs + 1, `the Host gave up ${Math.round(late)} ms off`);
+    sim.until(() => sim.now >= asked + START_MS + 2000, "the Guest wakes");
+    for (const p of sim.peers) {
+      const status = sim.status(p);
+      const run = status & (STATUS.started | STATUS.starting | STATUS.connected);
+      assert.equal(run, STATUS.connected, `seat ${p.seat}: status ${status.toString(16)}`);
+      assert.equal(reason(status), REASON.unanswered, `seat ${p.seat}: the reason`);
+    }
+    sim.hitch = faults;
+    sim.start();
+    sim.until(() => sim.peers.every((p) => sim.status(p) & STATUS.started), "the next run starts");
+    for (const p of sim.peers) assert.equal(reason(sim.status(p)), 0, `seat ${p.seat}: the last run's reason`);
+    sim.finish();
+    sim.ended(short.ticks - 1);
+    lines.push(sim.report("start unanswered", start));
+  }
+  // The Guest goes away while paused, every record delivered: the Host closes on the liveness timeout.
+  {
+    const start = at(),
+      sim = new Pipe(stream, truth, mode, { seed: 13 });
+    const [h, g] = sim.peers;
+    sim.connect();
+    sim.start();
+    sim.after(third, "the pause", () => assert.equal(h.g.game_coop_request(ASK.pause, 1, 0, 0, sim.now), 1));
+    sim.after(1000, "the Guest goes", () => (g.gone = true));
+    sim.until(() => !sim.flights.some((f) => f.to === h), "the Guest's last packets");
+    sim.dropped(h, REASON.silent, h.heardAt, LIVENESS_MS);
+    lines.push(sim.report("silent", start));
+  }
+  // The Guest's ticks packets are lost for a second and its repairs never come: the Host closes on the progress
+  // timeout, counted from the first packet past the gap, while the Guest's packets keep coming.
+  {
+    const start = at(),
+      sim = new Pipe(stream, truth, mode, { seed: 14 });
+    const [h, g] = sim.peers;
+    sim.connect();
+    sim.start();
+    let from = Infinity,
+      past = null;
+    sim.after(third, "the loss", () => (from = sim.now));
+    sim.drop = (p, channel) => p === g && sim.now >= from && (channel === 1 || sim.now < from + 1000);
+    sim.hooks.received = (p, channel) => {
+      if (p === h && channel === 0 && past === null && sim.now >= from + 1000) past = sim.now;
+    };
+    sim.until(() => past !== null, "the Guest's packets again");
+    // The timeout counts from the Host's last frame before that packet.
+    sim.dropped(h, REASON.stalled, past - h.frameMs, PROGRESS_MS, 2 * h.frameMs);
+    lines.push(sim.report("stalled", start));
+  }
+  // The transport closes mid-run: the Host, told so, closes at once, its run ending at its last confirmed tick.
+  {
+    const start = at(),
+      sim = new Pipe(stream, truth, mode, { seed: 15 });
+    const [h, g] = sim.peers;
+    sim.connect();
+    sim.start();
+    sim.after(third, "the close", () => {
+      g.gone = true;
+      assert.equal(h.g.game_coop_disconnect(REASON.left), 0, "not a transport's reason");
+      assert.equal(h.g.game_coop_disconnect(REASON.partnerGone), 1);
+      assert.equal(h.g.game_coop_disconnect(REASON.disconnected), 0, "closed twice");
+    });
+    const status = sim.status(h);
+    assert.equal(status & STATUS.connected, 0, "the Host stays connected");
+    assert.equal(reason(status), REASON.partnerGone, "the reason");
+    sim.endsAlone(h);
+    lines.push(sim.report("disconnect", start));
+  }
+  // An invalid record: the receiver stops on a protocol error and tells the partner.
+  {
+    const start = at(),
+      sim = new Pipe(stream, truth, mode, { seed: 8 });
+    let last = null;
+    sim.tap = (p, channel, bytes) => {
+      if (p.seat === 0 && channel === 0 && bytes[1]) last = bytes;
+    };
+    sim.connect();
+    sim.start();
+    sim.after(third, "the invalid record", () => {
+      const bad = Buffer.from(last);
+      bad.writeFloatLE(NaN, 40);
+      sim.receive(sim.peers[1], 0, bad);
+    });
+    sim.until(() => sim.peers.every((p) => sim.status(p) & STATUS.failed), "both stop");
+    const [h, g] = sim.peers.map((p) => sim.status(p));
+    assert.equal(g & STATUS.remote, 0, "the Guest found it");
+    assert.ok(h & STATUS.remote, "the Host heard it");
+    for (const s of [h, g]) assert.equal((s >>> 16) & 255, REASON.badRecord, "the error");
+    lines.push(sim.report("invalid record", start));
+  }
+  // A malformed message reaches the Guest as the Host starts a run: the Host stops waiting for it.
+  {
+    const start = at(),
+      sim = new Pipe(short, shortTruth, mode, { seed: 16 });
+    sim.connect();
+    sim.start();
+    sim.receive(sim.peers[1], 1, Uint8Array.of(99, 0, 0, 0, 0));
+    sim.until(() => sim.peers.every((p) => sim.status(p) & STATUS.failed), "both stop");
+    const [h, g] = sim.peers.map((p) => sim.status(p));
+    assert.equal(h & (STATUS.starting | STATUS.started | STATUS.remote), STATUS.remote, `the Host: ${h.toString(16)}`);
+    for (const s of [h, g]) assert.equal(reason(s), REASON.badMessage, "the error");
+    lines.push({ pipe: "error starting", ms: Math.round(at() - start) });
+  }
+  // A desync in lockstep: one peer's state changes under it, and both stop at a tick after the change.
+  {
+    const start = at(),
+      sim = new Pipe(stream, truth, { delay: 2, rmax: 0 }, { seed: 9 });
+    sim.connect();
+    sim.start();
+    let changed = -1;
+    sim.after(third, "the change", () => {
+      changed = sim.peers[0].g.game_coop_next();
+      assert.equal(sim.peers[0].g.game_coop_corrupt(1), 1);
+      sim.checking = false;
+    });
+    sim.until(() => sim.peers.every((p) => sim.status(p) & STATUS.desynced), "both desync");
+    for (const p of sim.peers) {
+      const [tick, local, remote] = new Int32Array(p.g.memory.buffer, p.g.game_coop_desync(), 3);
+      assert.ok(tick >= changed && local !== remote, `seat ${p.seat}: desync at ${tick}, changed at ${changed}`);
+    }
+    lines.push(sim.report("desync", start));
+  }
+  // Different builds: both stop at hello.
+  {
+    const start = at(),
+      sim = new Pipe(stream, truth, mode, { seed: 10 });
+    const version = new Uint8Array(guest.memory.buffer, guest.game_recorder_version(), 64);
+    const saved = version.slice();
+    version[0] ^= 1;
+    sim.connect();
+    sim.until(() => sim.peers.every((p) => sim.status(p) & STATUS.failed), "both refuse");
+    version.set(saved);
+    for (const p of sim.peers) assert.equal((sim.status(p) >>> 16) & 255, REASON.version, "the error");
+    lines.push({ pipe: "versions", ms: Math.round(at() - start) });
+  }
+  return lines;
+}
+
 // Inside the original, booted afresh from `directory` for each run (a run inside it, with no session around it,
 // leaves the verifier's music track ids and its own progress in place for the next): what it draws into its
 // offscreen render targets (the terrain, which bakes take) and its music (game_coop_music), after each tick or
@@ -508,12 +1291,15 @@ function bootLive(directory) {
 
 const liveGame = live && sevenTunes(live);
 const report = [];
+// The streams the session's cases play: one with perk menus, and a short one that ends by itself.
+const CASES = { menus: "coop-quest-2.4-ranked.rsi", short: "coop-quest-1.1.rsi" };
+const cases = {};
 for (const file of live ? LIVE_STREAMS : streams) {
   const recorded = decode(fs.readFileSync(path.join(corpus, file)));
   for (const { stream: variant, name: variantName } of live ? [{ stream: recorded }] : variants(recorded)) {
     const stream = requests(variant);
     const { run, cmd, ticks } = stream;
-    const label = variantName ? `${file} (${variantName})` : file;
+    const label = (stream.label = variantName ? `${file} (${variantName})` : file);
     coverage.sixth_choices += stream.extra === 6;
     coverage.seventh_choices += stream.extra === 7;
     coverage.beyond_picks += stream.beyond;
@@ -535,6 +1321,9 @@ for (const file of live ? LIVE_STREAMS : streams) {
     for (let i = 0; i < 100; i++) solo.game_coop_hash();
     const hashUs = (1000 * (performance.now() - at)) / 100;
     const forced = MODES.map((mode) => rollbacks(solo, stream, truth, mode));
+    const piped = PIPE_MODES.map((mode, i) => pipe(stream, truth, mode, i % 2 === 1));
+    for (const [name, wanted] of Object.entries(CASES))
+      if (file === wanted && !variantName) cases[name] = { stream, truth };
     for (const result of forced) {
       for (const name of ROLLBACK_COVERAGE) coverage[name] += result.stats[name];
       coverage.menu_rollbacks += result.menuRestores;
@@ -547,6 +1336,16 @@ for (const file of live ? LIVE_STREAMS : streams) {
       plain_ms: Math.round(truth.plainMs),
       solo_ms: Math.round(truth.soloMs),
       rollback_ms: forced.map((f) => Math.round(f.ms)),
+      pipe: piped.map(({ rollbacks, max_depth, max_lead, repairs, rtt_ms, lost, unheard, ms }) => ({
+        rollbacks,
+        max_depth,
+        max_lead,
+        repairs,
+        rtt_ms,
+        lost,
+        unheard,
+        ms,
+      })),
       // The engine's cost a tick over the plain run's: its capture, the hash and the raw state's digest.
       engine_us_per_tick: +((1000 * (truth.soloMs - truth.plainMs)) / ticks).toFixed(1),
       hash_us: +hashUs.toFixed(1),
@@ -570,5 +1369,12 @@ audit(plain);
 const auditMs = Math.round(performance.now() - at);
 corruptions(plain);
 receive(decode(fs.readFileSync(path.join(corpus, streams[0]))));
+prediction(cases.menus.stream.run);
+for (const line of pipeCases(cases.menus.stream, cases.menus.truth, cases.short.stream, cases.short.truth))
+  console.log(JSON.stringify(line));
 for (const [name, count] of Object.entries(coverage)) assert.ok(count > 0, `no ${name} across the co-op streams`);
-console.log(`Passed ${report.length} co-op streams; audit ${auditMs} ms; coverage ${JSON.stringify(coverage)}`);
+for (const [name, count] of Object.entries(pipeCoverage)) assert.ok(count > 0, `no ${name} between the peers`);
+console.log(
+  `Passed ${report.length} co-op streams; audit ${auditMs} ms; coverage ${JSON.stringify(coverage)}; ` +
+    `between the peers ${JSON.stringify(pipeCoverage)}`,
+);
