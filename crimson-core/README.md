@@ -168,6 +168,27 @@ Survival run whose dead player gets back up from a MediKit), and lists the
 unsupported Typ-o fixture. CI fails on any disagreement. A new divergence is reduced to its first differing state and
 decided against the original through Unicorn or its disassembly.
 
+### Co-op rollback
+
+```sh
+node crimson-core/checks/game_coop.mjs
+```
+
+The game module's co-op engine ([`host/coop.inc`](host/coop.inc)) plays every
+co-op bot stream with both players local, splitting its perk commands into the
+players' requests, and must match the plain run word for word. It then plays
+each again through forced rollbacks of up to 12 ticks, at lockstep and at
+several rollback windows, delays and frame budgets, and every confirmed tick
+must keep the state hash, terrain bake, terrain and music digests and raw state
+of the plain pass. Every byte of the run's state must be in the hash or in the
+engine's list of what it leaves out. One co-op scenario fills the effect pool
+under the ranked rules, freeing overflow entries at their own times. With
+`--live <game directory>` a few streams also play inside the original (from a
+copy of the directory), whose canonical words must match the plain run's every
+tick, and its terrain and music the plain pass's after every frame. The check
+prints each stream's rollbacks and costs; [network co-op](../docs/rewrite/network-coop.md)
+holds the design it checks.
+
 ### Original executable
 
 The oracles call the original code through Unicorn, using the ignored game
