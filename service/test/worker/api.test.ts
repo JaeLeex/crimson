@@ -4,8 +4,8 @@ import { concat, COOP_RUN_DOMAIN, fromHex, hex, LOGIN_DOMAIN, RUN_DOMAIN, sha256
 import { confirmMerge } from "../../src/accounts";
 import { tokenHash } from "../../src/auth";
 import { decodeReplay, inflateReplay } from "../../src/replay";
-import type { BoardView, CustomQuestDetailView, CustomQuestsListView, GameScore, LoginView, ProfileView, ReplaysView, RunDetailView } from "../../src/api-types";
-import { validateRecipeSource } from "../../src/runs";
+import type { BoardView, CustomQuestDetailView, CustomQuestsListView, GameScore, LoginView, ProfileView, ReplaysView, RunDetailView, Timeline } from "../../src/api-types";
+import { STALE, timelineFor, validateRecipeSource } from "../../src/runs";
 import vectors from "../vectors.json";
 
 const ORIGIN = "https://crimson.land";
@@ -696,6 +696,67 @@ describe("co-op runs", () => {
     expect((await SELF.fetch(`${ORIGIN}/runs/${run.id}.png`)).headers.get("content-type")).toBe("image/png");
 
     expect((await uploadPair(file, [alice, "alice"], [bob, "bob"])).status).toBe(409);
+  });
+
+  it("a pair's run page has both players' timelines, and an older one-player timeline is replayed again", async () => {
+    const [alice, bob] = await pair();
+    expect((await uploadPair(file, [alice, "alice"], [bob, "bob"])).status).toBe(201);
+    const id = vectors.coop_run.run_id;
+    const detail = await get<RunDetailView>(`/api/runs/${id}`);
+    expect(detail.timeline!.players!.map((player) => player.death_s)).toEqual([31.568, 27.904]);
+
+    // A co-op timeline recorded before timelines kept each player's own.
+    const { players: _, ...older } = detail.timeline!;
+    await env.REPLAYS.put(`runs/${id}.timeline.json`, JSON.stringify(older));
+    expect(await get<Timeline>(`/api/runs/${id}/timeline`)).toEqual(detail.timeline);
+    expect(await (await env.REPLAYS.get(`runs/${id}.timeline.json`))!.json()).toEqual(detail.timeline);
+  });
+
+  it("an older co-op timeline whose run no longer replays is kept, and its run replayed once", async () => {
+    const [alice, bob] = await pair();
+    expect((await uploadPair(file, [alice, "alice"], [bob, "bob"])).status).toBe(201);
+    const id = vectors.coop_run.run_id;
+    const { players: _, ...older } = (await get<RunDetailView>(`/api/runs/${id}`)).timeline!;
+    await env.REPLAYS.put(`runs/${id}.timeline.json`, JSON.stringify(older));
+    // A replay the verifier refuses in place of the run's.
+    await env.REPLAYS.put(`runs/${id}.crd`, decode64(vectors.illegal_command_run));
+    let replays = 0;
+    const REPLAYS = new Proxy(env.REPLAYS, {
+      get(target, key) {
+        if (key === "get") return (name: string) => (name.endsWith(".crd") && replays++, target.get(name));
+        const value = Reflect.get(target, key);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+    for (let view = 0; view < 3; view++) expect(await timelineFor({ ...env, REPLAYS }, id, 2)).toEqual(older);
+    expect(replays).toBe(1);
+    expect((await env.REPLAYS.head(`runs/${id}.timeline.json`))!.customMetadata![STALE]).toContain("perk_pick without an open perk");
+    expect(await get<Timeline>(`/api/runs/${id}/timeline`)).toEqual(older);
+  });
+
+  it("an upgraded co-op timeline that fails to store is not marked stale, and the next view stores it", async () => {
+    const [alice, bob] = await pair();
+    expect((await uploadPair(file, [alice, "alice"], [bob, "bob"])).status).toBe(201);
+    const id = vectors.coop_run.run_id;
+    const upgraded = (await get<RunDetailView>(`/api/runs/${id}`)).timeline!;
+    const { players: _, ...older } = upgraded;
+    await env.REPLAYS.put(`runs/${id}.timeline.json`, JSON.stringify(older));
+    let failures = 1;
+    const REPLAYS = new Proxy(env.REPLAYS, {
+      get(target, key) {
+        if (key === "put")
+          return (...args: Parameters<R2Bucket["put"]>) => (failures-- > 0 ? Promise.reject(new Error("R2 is down")) : target.put(...args));
+        const value = Reflect.get(target, key);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+    await expect(timelineFor({ ...env, REPLAYS }, id, 2)).rejects.toThrow("R2 is down");
+    const kept = (await env.REPLAYS.get(`runs/${id}.timeline.json`))!;
+    expect([kept.customMetadata, await kept.json()]).toEqual([{}, older]);
+    expect(await timelineFor({ ...env, REPLAYS }, id, 2)).toEqual(upgraded);
+    expect(await (await env.REPLAYS.get(`runs/${id}.timeline.json`))!.json()).toEqual(upgraded);
   });
 
   it("both partners' pages upload the same run at once: the service takes it once", async () => {
