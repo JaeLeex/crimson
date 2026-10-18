@@ -75,6 +75,11 @@ static constexpr int COOP_LATE_RMAX = 4, COOP_LATE_MS = 900000;
 // A frame's time running ticks, by the milliseconds each bucket holds up to:
 // under 1, 2, 4, 8, 16, and longer.
 static constexpr int COOP_FRAME_BUCKETS = 6;
+// How long a picker's perk screen takes to close after its pick, during which
+// its game produces no records: the screen's elements' timeline
+// (ui_elements_max_timeline on the perk screen), which the close runs back to
+// 0 at the frames' pace.
+static constexpr int COOP_PICK_FADE_MS = 400;
 // A rollback reaches back at most to the first unconfirmed tick, and a held bake
 // waits only until its tick is confirmed: both stay within the lead.
 static_assert(COOP_LEAD < COOP_SLOTS, "a slot or held bake comes round again before its tick is confirmed");
@@ -160,10 +165,11 @@ struct CoopWireStats {
 };
 // The session's counters over every run, as the run's own below, for the
 // telemetry its page reports when it ends (game_coop_telemetry): ticks run and
-// run again, frames whose due ticks all waited, rollbacks by depth, and frames
-// by the time their ticks took.
+// run again, frames whose due ticks all waited on the network and on a perk
+// pick (game_coop_advance), rollbacks by depth, and frames by the time their
+// ticks took.
 struct CoopSessionStats {
-  int32_t ticks, resimulated, stalled_frames;
+  int32_t ticks, resimulated, stalled_network, stalled_perk;
   int32_t depths[COOP_LEAD], frame_ms[COOP_FRAME_BUCKETS];
 };
 // Counters for the gate and the session's telemetry. checks/coop_link.mjs reads
@@ -187,9 +193,9 @@ struct CoopStats {
   int32_t depths[COOP_LEAD];
   // Frames (game_coop_advance) that ran ticks or ran them again, by the time
   // that took (COOP_FRAME_BUCKETS), and the longest (µs); frames with ticks due
-  // that ran none, waiting for records, the window or the picker (not a pause);
-  // the most ticks a frame ran again.
-  int32_t frame_ms[COOP_FRAME_BUCKETS], worst_frame_us, stalled_frames, frame_resimulated;
+  // that ran none (not in a pause), waiting on the network and on a perk pick
+  // (game_coop_advance); the most ticks a frame ran again.
+  int32_t frame_ms[COOP_FRAME_BUCKETS], worst_frame_us, stalled_network, stalled_perk, frame_resimulated;
   // Ticks run under the late window, and the furthest past the last confirmed
   // tick one of them ran on a record not yet real.
   int32_t late_ticks, late_lead;
@@ -217,6 +223,10 @@ static struct {
   // picker's choice due on the next tick it produces.
   bool asked, picking;
   int request;
+  // The last tick this machine confirmed that closed the partner's perk menu
+  // (its pick, or a cancel), and when (game_coop_advance's time), -1 before one.
+  int partner_pick;
+  double partner_pick_ms;
   CoopReported reported[COOP_RING];
   // The kept hashes (two peers), of ticks `hashes_from` on, up to `confirmed`.
   std::deque<CoopHash> hashes;
@@ -1044,7 +1054,7 @@ __attribute__((export_name("game_coop_start"))) int game_coop_start(int local, i
   coop.hold = 0;
   coop.end = COOP_NO_END;
   coop.asked = coop.picking = false;
-  coop.request = -1;
+  coop.request = coop.partner_pick = -1;
   coop.confirmed = coop.baked = coop.played = coop.heard = coop.drawn = -1;
   coop.next = 0;
   coop.terrain = coop.music = 0;
@@ -1109,12 +1119,34 @@ __attribute__((export_name("game_coop_produce"))) int game_coop_produce(double) 
 __attribute__((export_name("game_coop_deliver"))) int game_coop_deliver(int seat, int t, int real) {
   return seat < 0 || seat > 1 ? -1 : coop_take(seat, t, coop.scratch[seat], real);
 }
+// When this machine confirmed (game_coop_advance's `now`) its last confirmed
+// tick, if that tick closed the partner's perk menu: it ran with the menu the
+// partner's (coop_command), and opened none.
+static void coop_partner_pick(double now) {
+  const CoopTick &settled = coop.ticks[coop.confirmed & (COOP_RING - 1)];
+  bool opened = settled.commands && settled.command.type == 2;
+  if (coop.confirmed >= 0 && coop.partner_pick != coop.confirmed && settled.tick == coop.confirmed &&
+      settled.picker == 1 - coop.local && !opened) {
+    coop.partner_pick = coop.confirmed;
+    coop.partner_pick_ms = now;
+  }
+}
+// Whether the partner's perk screen may still be closing after its pick, its
+// records stopped at the pick's tick: this machine's last confirmed tick closed
+// the partner's menu, none of the partner's records past it has come, and it
+// is less than COOP_PICK_FADE_MS since this machine confirmed it. Records that
+// stay away longer are the network's.
+static bool coop_partner_closing(double now) {
+  return coop.confirmed >= 0 && coop.partner_pick == coop.confirmed && coop.remote == coop.confirmed &&
+         now - coop.partner_pick_ms < COOP_PICK_FADE_MS;
+}
+
 // The frame's ticks: a rollback when a record turned out other than the one a
 // tick ran on, then ticks while their records allow, at most `budget` new ones
 // (ticks run again are free), each tick's confirmation presenting what it
 // waited for before the next runs. Only the newest tick draws. Ticks run only
 // while this machine shows the run, and not past an end the peers agreed on.
-__attribute__((export_name("game_coop_advance"))) int game_coop_advance(int budget, double) {
+__attribute__((export_name("game_coop_advance"))) int game_coop_advance(int budget, double now) {
   if (!coop.active || (coop.hold & (COOP_HOLD_START | COOP_HOLD_STOP)) || game_state_id != GAME_STATE_GAMEPLAY ||
       game_state_pending != GAME_STATE_PENDING_IDLE_SENTINEL)
     return 0;
@@ -1124,6 +1156,7 @@ __attribute__((export_name("game_coop_advance"))) int game_coop_advance(int budg
     coop_restore(coop.end + 1);
   coop_correct();
   coop_confirm();
+  coop_partner_pick(now);
   coop_commit();
   // The newest tick the records, the window and the budget let run, final
   // ticks confirming on the way: it alone draws. A menu or the run's end
@@ -1138,8 +1171,18 @@ __attribute__((export_name("game_coop_advance"))) int game_coop_advance(int budg
     if (confirmed == t - 1 && coop_final(t))
       confirmed = t;
   }
+  // Whether a tick could not run, and what the first that could not waited on:
+  // the network (the partner's records, or the window they leave the run to
+  // predict in), or a perk pick (`perk`): this machine's own request, whose
+  // production stops at the request's tick until that tick is confirmed (and
+  // then at the picker's choice); the open menu's picker's record (the partner
+  // picking on its perk screen, or its choice on the way), which would stop the
+  // tick whatever stopped it first (a window of none does); or the
+  // partner's records past the tick its pick closed its menu on, the last
+  // confirmed, which its game produces only once its perk screen has closed
+  // (coop_partner_closing).
   int fresh = 0, again = 0;
-  bool stalled = false;
+  bool stalled = false, perk = false;
   for (;;) {
     int t = coop.next, lead = t - (coop.confirmed + 1);
     bool quiet = t <= coop.heard;
@@ -1150,12 +1193,14 @@ __attribute__((export_name("game_coop_advance"))) int game_coop_advance(int budg
     if (t > coop.produced || lead >= COOP_LEAD || (!coop_final(t) && lead >= coop_window())) {
       ++coop.stats.stalls;
       stalled = true;
+      perk = (perk_menu_open && !coop_real(perk_picker, t)) ||
+             (t > coop.produced ? coop.request >= 0 || coop.picking : coop_partner_closing(now));
       break;
     }
     if (perk_menu_open && !coop_real(perk_picker, t)) {
       ++coop.stats.stalls;
       ++coop.stats.picker_waits[perk_picker];
-      stalled = true;
+      stalled = perk = true;
       break;
     }
     coop_tick(t, quiet, t == last);
@@ -1164,6 +1209,7 @@ __attribute__((export_name("game_coop_advance"))) int game_coop_advance(int budg
     fresh += !quiet;
     again += quiet;
     coop_confirm();
+    coop_partner_pick(now);
     coop_commit();
     coop.stats.max_lead = std::max(coop.stats.max_lead, coop.next - (coop.confirmed + 1));
   }
@@ -1187,9 +1233,13 @@ __attribute__((export_name("game_coop_advance"))) int game_coop_advance(int budg
     ++coop.stats.session.frame_ms[bucket];
     coop.stats.worst_frame_us = std::max(coop.stats.worst_frame_us, (int32_t)(ms * 1000));
   }
-  bool waited = stalled && budget > 0 && !fresh && !(coop.hold & COOP_HOLD_PAUSE);
-  coop.stats.stalled_frames += waited;
-  coop.stats.session.stalled_frames += waited;
+  // A stalled frame: ticks were due and none ran, outside a pause. It counts as
+  // what its first due tick waited on. The picker's own frames on its perk
+  // screen run no ticks (the screen is not the run's) and count as neither.
+  if (stalled && budget > 0 && !fresh && !(coop.hold & COOP_HOLD_PAUSE)) {
+    ++(perk ? coop.stats.stalled_perk : coop.stats.stalled_network);
+    ++(perk ? coop.stats.session.stalled_perk : coop.stats.session.stalled_network);
+  }
   coop.stats.frame_resimulated = std::max(coop.stats.frame_resimulated, again);
   return fresh;
 }
