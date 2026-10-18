@@ -453,18 +453,21 @@ function createCoop({
     // Telemetry: which candidate pair carries the session.
     current.pc.getStats().then((report) => {
       if (link !== current || current.relay) return;
-      stats.transport = candidateType(report);
+      stats.transport = candidatePair(report);
       log("transport", stats.transport);
     }, () => {});
   }
-  function candidateType(report) {
+  // The selected pair's two ends by candidate type, "<local>/<remote>", the local one relay-<protocol> when it is
+  // this page's TURN allocation and says over what (the partner's never does); "webrtc" while no pair is known.
+  function candidatePair(report) {
     const all = [...report.values()];
     const pairId = all.find((each) => each.type === "transport" && each.selectedCandidatePairId)?.selectedCandidatePairId;
     // Firefox has no selected pair on its transport stats; it marks the pair instead, or only nominates it.
     const pair = pairId ? report.get(pairId) : all.find((each) => each.type === "candidate-pair" && (each.selected || (each.nominated && each.state === "succeeded")));
-    const local = pair && report.get(pair.localCandidateId);
-    if (!local) return "webrtc";
-    return local.candidateType !== "relay" ? local.candidateType : local.relayProtocol ? `relay-${local.relayProtocol}` : "relay";
+    const local = pair && report.get(pair.localCandidateId), remote = pair && report.get(pair.remoteCandidateId);
+    if (!local || !remote) return "webrtc";
+    const near = local.candidateType === "relay" && local.relayProtocol ? `relay-${local.relayProtocol}` : local.candidateType;
+    return `${near}/${remote.candidateType}`;
   }
   function failed(current, why) {
     if (link !== current || current.relay) return;
@@ -541,9 +544,24 @@ function createCoop({
     if (ended() || partnerPage === null || !link?.connected) return;
     if (link.relay) return drain();
     for (let frame; link && !link.relay && (frame = controlFrame()); ) {
-      try { link.channels[1].send(frame); } catch (error) { return failed(link, error); }
+      try { transmit(link, 1, frame); } catch (error) { return failed(link, error); }
       controlSent();
     }
+  }
+  // Test hook (checks/coop_browser.mjs): with api.delay ({ms, jitter}), what this page sends on the DataChannels
+  // leaves ms ± jitter late, ticks packets in any order and control frames in theirs, so the partner's game runs on
+  // predictions and rolls them back.
+  let controlAt = 0;
+  function transmit(current, id, bytes) {
+    const channel = current.channels[id];
+    if (!api.delay) return channel.send(bytes);
+    const { ms, jitter } = api.delay;
+    let at = now() + ms + (2 * Math.random() - 1) * jitter;
+    if (id === 1) at = controlAt = Math.max(at, controlAt);
+    setTimeout(() => {
+      if (link !== current || channel.readyState !== "open") return;
+      try { channel.send(bytes); } catch (error) { failed(current, error); }
+    }, at - now());
   }
   function replay() {
     handed = 0;
@@ -626,7 +644,7 @@ function createCoop({
         return false;
       }
       // A channel closing under us is a failing connection, not the game's error.
-      try { channelOut.send(bytes); } catch (error) {
+      try { transmit(link, 0, bytes); } catch (error) {
         failed(link, error);
         return false;
       }
@@ -660,6 +678,7 @@ function createCoop({
     get inviteUrl() { return inviteUrl; },
     onstate: null,
     onpeer: null,
+    delay: null,
     // The room's word on the pair: a seat's key it recorded (role, hex), a seed it issued.
     onkey: null,
     onseed: null,

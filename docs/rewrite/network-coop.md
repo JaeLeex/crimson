@@ -15,22 +15,67 @@ Crimsonland together in the same arena.
 
 ## 1. Executive summary & architectural decision
 
-Two-player online co-op is feasible on the `crimson-core` WASM game module
+Two-player online co-op runs on the `crimson-core` WASM game module
 (`crimson-core/PORT.md`) without rewriting gameplay or streaming world state.
 Both browsers run the same `game.wasm` binary at fixed 60 Hz simulation ticks
 (`portable_step_many`) and exchange per-player `PortableInput` tuples.
 
-Because [issue #632](https://github.com/banteg/crimson/issues/632) is a research
-and prototype track, cross-browser determinism, rollback frame budgets, terrain
-commit overhead, and WAN feel are treated as **explicit hypotheses gated by
-automated milestones (`M0a`, `M0b`, `M1`, `M2`)** before committing to 4-player
-scope. Two-player online co-op records standard replays and ranks under the
-site's [ranked rules](ranked-rules.md) on its own boards (Section 5.3, `M3`).
+Determinism across instances, rollback frame budgets, terrain commit overhead
+and WAN feel each have an automated gate (`M0a`, `M0b`, `M1`, `M2`), and each
+[milestone's status](#8-phased-deliverable-plan-acceptance-matrix) says what its
+gate holds; the [verdict](#verdict-m2) below weighs the measurements. The gates
+run the module on V8 (Node and Chrome) and as native code, and Wasmtime's
+Cranelift matches them snapshot for snapshot on the corpus's two-player streams
+too (`crimson-core/checks/wasmtime_check.py`); no gate runs Firefox's
+SpiderMonkey or Safari's JavaScriptCore, so a session with either browser is
+untested.
+Two-player online co-op plays in the browser with rollback, records standard
+replays and ranks under the site's [ranked rules](ranked-rules.md) on its own
+boards (Section 5.3, `M3`). Four players remain a research question of
+[issue #632](https://github.com/banteg/crimson/issues/632): the verdict says
+what a 4-player step must measure before that scope is committed to.
 
-### Historical lesson (`status.md`)
+### Verdict (`M2`)
 
-An earlier lockstep, rollback, and relay stack was removed (`bc45c5b6a`)
-**because it never restored full state** ([status](status.md#intentional-differences)).
+The measurements (Section 3.1) bear the architecture out. Late in a long
+2-player Survival run, under the rules a co-op session plays, the simulation
+alone (headless: nothing drawn, no wire) costs about 0.14 ms a tick through the
+rollback engine in `game.wasm` (about 0.23 ms p99 in each of three runs under
+node and two in Chrome); the hard cap's 12-tick rollback over ticks run on a
+stand-in record, their bakes held, costs about 1.8 ms, 2.30–2.37 ms at p99 in
+those five runs (about 14% of a 60 Hz frame), and at the depths a 60 ± 20 ms
+partner brings (1–3 ticks) a frame's simulation took 0.80–0.88 ms at p99. State
+capture and restore are memcpys of about 0.01 ms (0.013–0.015 ms p99) for a
+slot of up to 438 KiB, and the engine holds 7.6 MiB; the state hash is the
+engine's largest cost per tick. The runs' ranges are not bounds (Section 3.1).
+With drawing on, measured only early in a run (seconds 6 to 11) in headless
+Chrome at about 27 to 30 frames a second, the browser client's frames that ran
+ticks while its partner's sends came 60 ± 25 ms late took 0.8 to 0.9 ms
+(2.3–4.0 ms p99 in two runs) whole, about 3 ticks each. Input delay 2 (longer past
+about 83 ms one way) with window 8, narrowing to 4 late in Survival, absorbs the
+simulated networks without a desync and keeps 59 ticks a second at 120 ms one
+way, and the late game's simulation, rollbacks at the cap included, stays well
+inside a 60 Hz frame, so streaming state from an authoritative host is not
+needed on these costs. What a late-game frame's drawing adds is not measured,
+and what the local numbers cannot show, real paths over TURN and the room's
+relay, the sessions' telemetry reports once deployed (Section 6.2,
+"Telemetry").
+
+Four players look feasible on these costs, with caveats. A tick's cost is
+dominated by the creature pool, which stays at 384 slots, so four players should cost
+well under twice two players' tick; even at twice, a 12-tick rollback would come
+to about 4.7 ms p99 on this machine, within a 60 Hz frame. Rollback depth would follow the
+worst of three links rather than one, so deep rollbacks get more frequent, and
+a device several times slower than this one would have little room left at the
+cap. The original keeps two player tables (`player_state_table[2]`) and
+`PortableConfig.players` takes 1 or 2, so four players also mean widening the
+game's state, and each peer would carry three partners' records and hashes. A
+4-player step needs measuring before that scope is committed to.
+
+### Historical lesson
+
+An earlier lockstep, rollback, and relay stack in the Python and Zig ports was
+removed (`bc45c5b6a`) **because it never restored full state**.
 In `crimson-core`, `crimson-core/host/keyframes.inc` (`game_run_spans` +
 `KeyframeHost` + `game_effect_overflow`) and `crimson-core/checks/game_seek.mjs` /
 `crimson-core/checks/game_practice.mjs` establish single-player seek and branch
@@ -61,11 +106,14 @@ networking work on proving:
      `input_produced_tick = sim_tick + D`, independent of whether simulation
      execution is temporarily stalled waiting on the network.
 
-   - **Base input delay**: **2 ticks (33.3 ms)** at $\text{RTT} \le 60\text{ ms}$
-     (adaptive 1–8 ticks in `M1` lockstep, changed only at negotiated epoch
-     boundaries). Mouse aim (`aim_scheme == 0`) converts the local screen cursor
-     to world coordinates at input-sampling time and records the world point into
-     `PortableInput`.
+   - **Base input delay**: **2 ticks (33.3 ms)**, and longer once the window
+     late in a long Survival run (4 ticks) would no longer cover a one-way trip
+     with it: the Host sets each run's delay from the round trip the session
+     measured, 2 up to about 83 ms one way, a tick more for each 16.7 ms past
+     that, at most 8 (Section 3.3, rule 4; adaptive 1–8 ticks in `M1`
+     lockstep, changed only at negotiated epoch boundaries). Mouse aim
+     (`aim_scheme == 0`) converts the local screen cursor to world coordinates
+     at input-sampling time and records the world point into `PortableInput`.
 
    - **Rollback window (`M2`)**: Up to **8 speculative ticks (133.3 ms)** (hard
      cap **12 ticks / 200 ms**, enforced **before every individual tick step**)
@@ -346,10 +394,10 @@ Safari JSC, Wasmtime, and native `wasm2c`:
 
 - **Isolation from 1P `replay.inc` and `watch.inc`**:
 
-  - `crimson-core/host/replay.inc:162, 190-207` and `crimson-core/host/watch.inc:332-351`
-    hardcode `player_count = 1` and parse `live.replay` with a single 20-byte
-    `PortableInput` per tick. Calling `live_end()` -> `replay_payload()` on a
-    2-player buffer would misparse Player 1's `move_x` float bits as
+  - The audit found `replay.inc`'s serializer and `watch.inc` hardcoding
+    `player_count = 1` and parsing `live.replay` with a single 20-byte
+    `PortableInput` per tick: `live_end()` -> `replay_payload()` on a 2-player
+    buffer would have misparsed Player 1's `move_x` float bits as
     `command_count`.
 
   - **Rule**: co-op records a standard `.crd` replay with `player_count = 2`;
@@ -358,9 +406,9 @@ Safari JSC, Wasmtime, and native `wasm2c`:
     confirmed tick writes `[in[0], in[1]]` and its derived commands:
     `perk_menu_open { player_index: perk_picker }` on $T_{\text{open}}$ and
     `perk_pick { player_index: perk_picker, choice_index }` on
-    $T_{\text{open}} + 1$ (Section 5.1). `replay.inc` and `watch.inc` are
-    generalized to `player_count` inputs per tick (`M3`); until then co-op keeps
-    `live_end()` from feeding 2-player ticks into the 1P serializer.
+    $T_{\text{open}} + 1$ (Section 5.1). `replay.inc` writes `player_count`
+    inputs per tick (`M3`); its reader, and so the watch path, takes one-player
+    replays only and refuses a co-op one (`M3`'s status).
     `checks/game_coop.mjs` and desync diagnostics read the same `.crd`.
 
 #### 5. Between-tick `gameplay_render_world()` side effects & local state in `game_run_spans`
@@ -433,19 +481,79 @@ explicitly classified:
 
 ## 3. Research question 2: Lockstep vs. rollback vs. authoritative host
 
-### 3.1 Measurements & estimates on `crimson-core` (Apple M1 Pro, WASM)
+### 3.1 Measurements on `crimson-core` (Apple M1 Pro, WASM)
+
+The late-game rows come from `checks/coop_cost.mjs`, under node and, through
+`checks/coop_browser.mjs`, in Chrome on a cross-origin isolated page (5 µs
+timer). They are simulation alone: the module runs headless
+(`grim_render_disabled`), so a tick's world draw and the held bakes' commit into
+the terrain draw nothing, and no wire carries the records. A bot plays both
+players of the 2-player Survival run a co-op session starts (`coop_latch`: the
+ranked profile, the original's bugs fixed, which puts the effect overflow to
+use) with their health held far past full, so the run reaches the late game:
+all 384 slots of the creature pool first hold a creature at 10.4 minutes
+(`pool.first_full_minute`), and between 20 and 35 minutes they all do on 96.6%
+of ticks, never fewer than 368 (`pool.full_share`, `pool.min_active`), the
+spawn rate rising with the run's time; at 20 minutes player one holds 46 of the
+56 perks the run has available (`perks.at_from`; the bot takes every one but
+those that kill or spend health). Each row is per call between 20 and 35
+minutes of the run's time, node first, then Chrome. A range is the lowest and
+highest of three runs under node and two in Chrome (one figure where they
+agree), not a bound: more runs, or a busier machine, may land outside it.
+Maxima are wall-clock outliers, collection pauses among them, so the p99 is the
+budget's figure. The machine was otherwise busy (load averages of 4 to 10 on
+its 10 cores while these ran), which the p99s and maxima carry more than the
+p50s. The bot plays simply, kiting and picking up the bonuses near it,
+so a human's late game, with stronger weapons and more projectiles and effects,
+may cost more per tick.
 
 | Metric | Value | Source / Evidence |
 | --- | --- | --- |
-| Tick frequency | **60 Hz** ($\Delta t = 16.6667\text{ ms}$) | `crimson-core/host/host.cpp:626` |
-| 2P input size per tick | **40 B** (`2 × sizeof(PortableInput)`) + **4 B** `count` + $8k\text{ B}$ commands | `crimson-core/host/api.h:53-54` |
-| Uncompressed base slot (`game_run_spans` + `KeyframeHost`) | **231,173 B (~225.8 KiB)** | `70` spans (`229,233 B`) + `KeyframeHost` (`1,940 B`); audio state excluded |
-| Uncompressed worst-case slot (with max 2,048 `effect_overflow` entries) | **616,197 B (~601.8 KiB)** | Base `231,173 B` + `2,048 × 188 B` (`385,024 B`, `crimson-core/game/include/effect_overflow.h`) |
-| 16-slot ring resident memory | **3.7 MiB base / 9.8 MiB worst-case** (preallocated) | Includes 16 state slots + 16 bake slots |
-| Snapshot capture/restore time (raw `memcpy`, no `zstd`) | **~0.02–0.04 ms base / ~0.08 ms full overflow** `[ESTIMATE]` | Measured in `M0b` (`checks/game_coop.mjs`) |
+| Tick frequency | **60 Hz** ($\Delta t = 16.6667\text{ ms}$) | `portable_step_many` sets `frame_dt = 1.0f / 60.0f` (`crimson-core/host/host.cpp`) |
+| 2P input size per tick | **40 B** (`2 × sizeof(PortableInput)`) + **4 B** `count` + $8k\text{ B}$ commands | The `sizeof(PortableInput)` and `sizeof(PortableCommand)` asserts (`crimson-core/host/api.h`) |
+| State slot | **438 KiB** (448,181 B), the largest captured, the effect overflow in use; **about 680 KiB** worst case | The largest slot captured (`CoopStats.slot_bytes`, which `coop_cost.mjs` prints); the worst case: 231,981 B with no overflow entry in use (the largest slot `coop_cost.mjs --from 1 --to 2` prints, before the run's effects reach the overflow), `2,048 × 188 B` of entries and `2,048 × 40 B` of their queued decals (`GAME_EFFECT_OVERFLOW_CAPACITY`, `crimson-core/game/include/effect_overflow.h`; `run_state_size`) |
+| Co-op engine memory | **7.6 MiB** (7,995,392 B) over the plain run (16 slots, records, per-tick results, held bakes) | `game.wasm` memory of the run through the engine less the plain run's |
+| Slot capture (`run_state_write`) | **0.007–0.008 / 0.013 ms** p50/p99; Chrome **0.010 / 0.015 ms** | `game_coop_capture` alone: the state before the next tick into its slot, as the tick does first |
+| Slot restore (`run_state_read`) | **0.006–0.007 / 0.013–0.014 ms** p50/p99; Chrome **0.005 / 0.015 ms** | `game_coop_restore` one tick back, alone |
+| Canonical state hash | **0.033 / 0.045–0.051 ms** p50/p99; Chrome **0.035 / 0.045–0.050 ms** | `game_coop_hash` alone: most of what the engine adds to a tick |
+| Late-game 2P plain step | **0.098–0.100 / 0.204–0.206 ms** p50/p99; Chrome **0.100 / 0.205–0.210 ms** | `portable_step_many`, one tick |
+| Late-game 2P co-op tick | **0.139–0.142 / 0.227–0.234 ms** p50/p99; Chrome **0.140–0.145 / 0.225–0.230 ms** | `game_coop_advance` running one tick: the step, the slot capture, the hash and the bake's digest |
+| Late-game 8-tick rollback | **1.25–1.27 / 1.59–1.69 ms** p50/p99; Chrome **1.27–1.29 / 1.60–1.66 ms** | The frame in which player two's real record arrives for the first of 8 ticks run on a stand-in it contradicts, their bakes held: it takes them back, runs them again with the next tick, and commits their bakes to the terrain (which, headless, draws nothing) |
+| Late-game 12-tick rollback (the hard cap) | **1.81–1.85 / 2.30–2.35 ms** p50/p99; Chrome **1.84–1.88 / 2.34–2.37 ms** | As above, 12 ticks |
+| Late-game frame work, 60 Hz | **0.45–0.46 / 0.80–0.86 ms** p50/p99 (max 1.17–3.65); Chrome **0.46–0.48 / 0.84–0.88 ms** (max 1.17–1.42) | 60 s of frames that ran ticks (every frame at 60 Hz) from 35 minutes of the run's time on, with player two's records 60 ± 20 ms one way, window 4 (past 15 minutes): rollbacks of 1–3 ticks on most frames, 1.67 ticks run again per tick, no stalled frame |
+| Late-game frame work, 144 Hz | **0.17–0.18 / 0.54–0.56 ms** p50/p99 (max 0.78–0.81); Chrome **0.18–0.19 / 0.54–0.57 ms** (max 0.78–0.86) | As above at 144 Hz, the next 60 s, where 60% of frames ran ticks: rollbacks of 1–2 ticks (a few of 3), 1.14 ticks run again per tick, no stalled frame |
+| Early-game live frame, drawing on (Chrome) | **0.8–0.9 / 2.3–4.0 ms** p50/p99 (max 2.8–4.9) | `checks/coop_browser.mjs`, two runs: the host page's animation frames that ran ticks while the guest's sends were held 60 ± 25 ms (round trips of 58–63 ms), seconds 6 to 11 of a run (ticks 363 to 686: few creatures yet), timed whole (input, the game's frame with its ticks and the newest tick's drawing, the WebGL calls; 0.1 ms timer, the page not cross-origin isolated). Headless Chrome drew through SwiftShader at 27–30 frames a second on the busy machine, not 60, so each such frame ran 2.6–2.9 ticks, rollbacks' included; at 60 Hz a frame would run fewer |
 | `game.wasm` step cost (9-min 1P Survival avg, `grim_render_disabled = 1`) | **~0.028 ms / tick** (~36,000 ticks/s) | Measured ([replay viewer](replay-viewer.md#what-it-can-afford)) |
 | `core.wasm` step cost (35-min 1P Survival avg, 210,268 ticks) | **~0.126 ms / tick** (26,497 ms total) | Measured (`crimson-core/results/survival-spawn-profile.json`) |
-| Late-game 2P Survival p50/p99 step & rollback cost (20–35 min) | **Hypothesis: <0.6 ms/tick; gated by `M0b` benchmark** | 2P doubles `survival_spawn_cooldown` decrement (`survival_update.cpp:217`); `M0b` measures p50/p99 over 12-tick rollbacks with full effect overflow |
+
+Rollback under the network profiles comes from `checks/game_coop_live.mjs`,
+which prints each machine's counters for the play before each run's end and
+the table's columns derived from them (`m2`: `played`, `table`; the same in
+every run of the check): two originals over its simulated pipe, the Host at
+60 Hz and the Guest at 144 Hz, 2,000 to 3,600 ticks of early Survival each
+before the run's end, with window 8 (narrowed to 4 under the burst and 120 ms
+profiles) and the input delay the round trip gives (2, and 4 at 120 ms).
+Rollbacks per minute are per 3,600 ticks run; the mean depth is over each
+machine's rollbacks, the deepest either machine's; ticks run again are per tick
+run; stalled frames are a share of the machine's frames (a frame is stalled
+when every tick it was due waited: for records, the window or the picker; a
+pause is none). Each run also has a 250 ms start offset, a 300 ms stall on the
+Guest's machine and a perk the other machine waits for, so its counts are not
+the network's alone; the check does not tell them apart, but under 10 and 30
+ms, where a record is rarely late by itself, these are the likely source of
+most rollbacks and stalled frames.
+
+| Profile (one way) | Rollbacks per minute, Host / Guest | Mean depth (deepest) | Ticks run again per tick | Stalled frames |
+| --- | --- | --- | --- | --- |
+| 10 ms | 207 / 245 | 4.2 / 4.0 (8) | 0.24 / 0.27 | 0.3% / 3.7% |
+| 30 ± 5 ms | 357 / 239 | 2.9 / 3.8 (8) | 0.29 / 0.25 | 3.5% / 0.3% |
+| 50 ± 15 ms, bursts of 10 lost packets every 4 s from 20 s | 1,367 / 1,233 | 2.1 / 2.8 (12) | 0.80 / 0.97 | 1.8% / 5.9% |
+| 60 ± 20 ms, 1% loss | 1,810 / 1,949 | 1.8 / 1.9 (8) | 0.90 / 1.03 | 4.0% / 0.7% |
+| 120 ± 10 ms, input delay 4 | 2,700 / 2,462 | 3.0 / 2.7 (8) | 2.29 / 1.83 | 2.7% / 0.3% |
+
+These are a local pipe's numbers. What sessions see over real direct WebRTC
+paths, TURN over UDP and TCP and the room's relay comes from the sessions'
+telemetry (Section 6.2, "Telemetry") once deployed.
 
 ### 3.2 Architecture comparison
 
@@ -480,6 +588,10 @@ monotonically non-decreasing tick frontiers**:
    $\Delta T = (\text{remote\_head\_tick} - D) - \text{next\_sim\_tick} + \frac{\text{RTT}}{2 \times 16.667\text{ ms}}$.
    Scale `grim_frame_dt` clamping (`fminf(grim_frame_dt, 0.1f)`) by
    `clamp(1.0f + 0.01f * delta_T, 0.98f, 1.02f)` when accumulating `coop_banked_s`.
+   The remote head is the newest `head_tick` the partner's ticks packets carried
+   (`coop_ahead`, `host/coop_wire.inc`). A peer stalled at its window still runs
+   on its banked reserve, so the one ahead slows only once that has drained:
+   two runs a stall left 8 ticks apart come back together within a few seconds.
 
 2. **Monotonic, gap-free input production (`++input_produced_tick`)**:
    While `input_produced_tick < next_sim_tick + D` **and**
@@ -492,16 +604,27 @@ monotonically non-decreasing tick frontiers**:
    without advancing `input_produced_tick` past `next_sim_tick + D`.
 
 3. **Unconsumed accumulator preservation**:
-   Unlike `session.inc:449-450` (which subtracts `live.due / 60.0f` before ticks
-   run), `coop_banked_s` subtracts `1.0f / 60.0f` **only as each new tick
+   Unlike a 1P live run (`game_live_frame`, `host/session.inc`, which subtracts
+   `live.due / 60.0f` before ticks run), `coop_banked_s` subtracts `1.0f / 60.0f` **only as each new tick
    actually executes**, clamping `coop_banked_s` to at most `4.0f / 60.0f`
    whenever `next_sim_tick` is blocked by a network stall or menu barrier so
    resuming never triggers a burst of catch-up ticks.
 
 4. **Per-run constant input delay $D$**:
    In the `M1`/`M2` prototype, **hold $D$ constant for the duration of each run**
-   (negotiated from measured handshake RTT in `MSG_START_RUN`: fixed $D = 2$ in
-   `M2` rollback, or fixed $D \in [1, 8]$ per run in `M1` lockstep).
+   (negotiated from measured handshake RTT in `MSG_START_RUN`; fixed
+   $D \in [1, 8]$ per run in `M1` lockstep). In `M2` rollback
+   $D = \text{clamp}(\lceil \text{RTT} / (2 \times 16.667\text{ ms}) \rceil - 4 + 1, 2, 8)$
+   (`coop_run_delay`, `host/coop_live.inc`). A partner's record for tick $t$
+   leaves as its run reaches $t - D$ and takes the one-way trip, $L$ ticks
+   ($\lceil \text{RTT} / (2 \times 16.667\text{ ms}) \rceil$), so it arrives as
+   the runs, in step, reach $t - D + L$: $L - D$ ticks past $t$, which this
+   run may have run on a prediction only within its window $W$. With a tick to
+   spare, $L - D \le W - 1$, so the narrowed window of 4 needs
+   $D \ge L - 3$, as the formula has it: $D = 2$ covers trips of up to 5
+   ticks (about 83 ms one way), and each tick longer adds one. Short of that,
+   records land past the window, and both runs would wait at their windows for
+   each other's records, the whole game slowing.
 
 ---
 
@@ -555,7 +678,11 @@ the music ticks from `t` on queued, and never draws gameplay RNG. `string_used` 
   run again. Ticks that run again are *quiet* ($t \le$ `heard`, the high-water of
   executed ticks): they cost CPU but no pacing credit (`game_coop_advance`
   returns new ticks only), play no sound and draw nothing; of a frame's ticks,
-  only the newest draws.
+  only the newest draws. When the run stops sooner than the frame's ticks were
+  counted (its end, a perk menu waiting for its picker, an agreed end that took
+  predictions back), the tick it stopped at runs again, quiet, and draws, its
+  bake and music left as they were presented: a frame never keeps showing a
+  state a rollback took back.
 
 #### Canonical cross-peer snapshot & hash (`coop_canonical_hash`)
 
@@ -589,7 +716,10 @@ run's surroundings:
    span, so run start resets both and keyframes keep both. Then the run's other
    globals the snapshot leaves out that a tick reads: perk and weapon clocks
    (Lean Mean Exp Machine's award, Man Bomb's, Fire Cough's and Hot Tempered's
-   intervals), update counters, the players' cursors, the screen and menu flags
+   intervals), the last tick's time step (`frame_dt`: a perk pick reads it
+   before the tick sets its own, and inside the original the run keeps its own
+   in `LiveSettings`, apart from the frames'), update counters, the players'
+   cursors, the screen and menu flags
    a tick checks, Survival's first kill, the effect template spawns copy.
    `game_coop_audit` holds this to every byte of `game_run_spans`: flipping a
    byte must change the words unless `COOP_UNHASHED` (`host/coop.inc`) lists it
@@ -1183,8 +1313,7 @@ transport without TCP head-of-line blocking, whereas the TCP and TLS relays
 (`turn:` with `transport=tcp`, `turns:`) and the `CoopRoom` WebSocket relay
 **do** experience TCP head-of-line blocking under packet loss. They are
 retained as reachability fallbacks, and the client records the selected
-`RTCIceCandidatePair` (`host` / `srflx` / `relay-udp` / `relay-tcp` /
-`ws-relay`) in its latency telemetry.
+`RTCIceCandidatePair`'s two ends (or `ws-relay`) in its latency telemetry.
 
 Any fallback from WebRTC to `ws-relay` is coordinated via an explicit
 `MSG_SWITCH_TRANSPORT { transport_epoch }` message through the room so both
@@ -1238,9 +1367,11 @@ candidates are partner text messages carrying the link id, and messages of
 another link are stale. Each page sends its candidates after its
 description and holds the partner's until the remote description is set. A
 connected WebRTC link keeps playing while either room socket is away. Both
-channels open means connected, and the selected candidate pair's local type
-(`host`, `srflx`, `prflx`, `relay-udp`, `relay-tcp`, `relay-tls`) is kept
-for telemetry.
+channels open means connected, and the selected candidate pair's two ends
+are kept for telemetry as `<local>/<remote>` candidate types (`host`, `srflx`,
+`prflx`, `relay`), the local one `relay-udp`, `relay-tcp` or `relay-tls` when it
+is this page's own TURN allocation and names its protocol; the partner's relay
+never says which (`webrtc` until the pair is read).
 
 **Fallback.** A link that does not connect in time, fails, closes a channel,
 or stays disconnected past a short ICE restart by the host (on the same
@@ -1527,6 +1658,39 @@ returns, for the shell that watches the session:
 adds the session's counters: packets sent, received and lost, stale packets
 and messages, repairs and the records they carried, and the round trip.
 
+#### Telemetry
+
+When a session whose hello came ends (the game closes it, the page ends it, the
+page goes, or the partner's new hello replaces it), the page reports one summary
+to the site's
+[gameplay analytics](leaderboard-identity.md#browser-gameplay-counts), with the
+same opt-outs: the transport it last ran over, from both ends of the selected
+candidate pair: `direct` when neither end is a relay, `turn-udp` or `turn-tcp`
+(TCP or TLS) when this page's own TURN relay carries it and says over what,
+`turn` when a relay carries it over a leg this page cannot see (only the
+partner relays, or this page's relay names no protocol), `ws-relay` for the
+room's relay, or `unknown` before the pair was read; its round trip's
+bucket (under 25, 50, 100 and 200 ms, and longer), its minutes in runs, whether
+a desync ended it, and the game's counters: its frames whose due ticks all
+waited (for records, the window or a perk pick; not in a pause), its rollbacks
+by depth and its frames that ran ticks or ran them again by the time that took,
+over all its runs. The game times that work by `host_clock_ms`, a clock finer
+than a millisecond (`SDL_GetTicksNS` in the clients), not the whole milliseconds
+of `host_time_ms`, which the original reads. Each summary comes from
+`game_coop_report()`, once: the game queues a session's as it closes, or as a
+new hello replaces it before its counters go, and the page takes them in order
+(`game_coop_telemetry()` reads the running session's). The buckets are
+`client/web/analytics.json`'s. A summary
+holds what its seconds in runs can: at most `max_seconds` (4 hours) of them, a
+rollback a tick, and `max_rate` (240) frames a second, stalled ones too; the
+service refuses one that claims more, as it bounds play totals by the minute a
+post covers, and the page scales counts past those bounds down in proportion
+before it sends. The service
+adds each summary to daily totals by transport (`coop_totals`) and keeps no
+room, seat, token or row per session; the admin's `/analytics` shows the last
+30 days. Each page reports its own session, so a session counts once per player
+whose page reports.
+
 ---
 
 ## 7. Research question 6: Focus loss, suspension & desync diagnostics
@@ -1715,9 +1879,9 @@ and messages, repairs and the records they carried, and the round trip.
    setup from the menus and end screens, pause, leave, the partner's pick card
    and the end screens. The room service (`service/src/coop.ts`), the transport
    (`client/web/coop.js`) and the client bridge with the page's lobby and invite
-   (Section 6.1) carry it between two browsers. What the deliverable still
-   lacks is telemetry the service collects: the transport and round trip are
-   kept per page (`coop.stats()`, `game_coop_stats`) but reported nowhere.
+   (Section 6.1) carry it between two browsers. Each session's transport,
+   round trip and desync reach the service's telemetry (Section 6.2,
+   "Telemetry") since `M2`.
 
    The transport's tests, `checks/coop.test.mjs` (CI's client job), run two
    pages against a fake room with the service's limits and fake peer
@@ -1783,35 +1947,94 @@ and messages, repairs and the records they carried, and the round trip.
 
 ### Milestone `M2`: Bounded rollback in the browser prototype
 
-1. Enable fixed $D = 2$ + bounded rollback ($R_{\max} = 8$, or `4` past 15 min
-   Survival) on top of the `M1` transport and `M0b` rollback ring.
+1. Enable $D = 2$ (longer on a long round trip, Section 3.3) + bounded
+   rollback ($R_{\max} = 8$, or `4` past 15 min Survival) on top of the `M1`
+   transport and `M0b` rollback ring.
 
 2. Record frame-time distributions, rollback depth histograms, and late-game CPU
    costs across direct P2P, TURN UDP, TURN TCP, and WS relay for the final
    #632 feasibility report.
 
+3. **Status**: the game side plays it. The Host starts every run with
+   $R_{\max} = 8$ in `START_RUN` and $D$ from the round trip (2 up to about
+   83 ms one way; Section 3.3, rule 4), and each peer narrows its own window to 4
+   past 15 minutes of a Survival run (`coop_window`). Records stay $D$ ticks
+   ahead of the run, topped up after the frame's ticks so the frame's ticks
+   packet carries them, and the frame time a peer banks follows the clock-drift
+   rule (Section 3.3). `game_coop_stats()` adds the rollbacks by depth (1 to
+   12), the frames that ran ticks or ran them again by the time that took on
+   `host_clock_ms` (under 1, 2, 4, 8 and 16 ms, and longer) and the longest, the
+   frames whose due ticks all waited outside a pause, the most
+   ticks a frame ran again, the ticks run under the narrowed window and their
+   deepest guess, and the ticks run again whose players' deaths or team wipe a
+   correction revised. The session's share of them, its transport and round
+   trip go to the service as each session ends (Section 6.2, "Telemetry").
+
+   `checks/game_coop_live.mjs` plays the `M1` sessions with these settings and
+   then five network profiles (10 ms one way; 30 ± 5 ms; 50 ± 15 ms with bursts
+   of lost packets; 60 ± 20 ms with 1% loss; 120 ± 10 ms), a Survival run under
+   each that starts ahead on one machine and stalls 300 ms on the other: a perk
+   picked from either seat while the other predicts, pauses from either seat,
+   the window's narrowing (brought forward), a leave from the pause banner and
+   team wipes, one of them ranked (both names signed under 60 ms with loss, both
+   machines queuing the same upload of the replay's confirmed run), then wipes
+   until a correction revised one; at 120 ms the game must keep 59 ticks a
+   second past the narrowing; the first quest plays under the lossiest profile.
+   M3's ranked flow runs under rollback throughout: each replay it holds and
+   signs, and the end screen's score, come from the run's last confirmed tick
+   (`coop_over`, or `coop_settle` for a run left early), both machines' replays
+   and outbox entries byte for byte the same. It holds both machines' runs to each other and to the
+   records as `M1` does, the Host's music to its run played again without
+   predictions, every frame to the newest tick run, the perk and end screens to
+   confirmed ticks, predictions to the window, and the two runs to each other
+   once a stall settled. Auditing the session for ticks it assumed confirmed
+   found two: a run left early saved its replay and score from the predicted
+   state, and a frame that stopped at a menu or the run's end kept showing a
+   prediction a rollback had taken back. A third predates rollback: a perk pick
+   read the frame's time step, not the last tick's (Breathing Room), so the two
+   machines' frame rates parted their runs; a 1P live run parted from the
+   verifier the same way, though no result changed (`fix(game)` before `M2`).
+
+   `checks/coop_browser.mjs` plays the browser path with rollback: one page's
+   DataChannel sends held 60 ± 25 ms (`coop.js`'s `delay` hook) make the other
+   page's game roll back while both keep agreeing on every confirmed tick, and
+   the sessions the host's page played reach the local service's co-op totals,
+   the desync among them; meanwhile the host's page times its frames that ran
+   ticks, drawing on.
+
+   Measured locally (Section 3.1): the late game's simulation costs under node
+   and in Chrome (`checks/coop_cost.mjs`, three runs and two), frame work at 60
+   and 144 Hz, the browser client's early-game frames with drawing on
+   (`checks/coop_browser.mjs`), and rollback depths, ticks run again and stalled
+   frames under the five profiles. The costs come from the run a co-op session
+   starts and from rollbacks over ticks run on a stand-in, their bakes held, and
+   the capture is timed alone. The comparison across direct paths, TURN over UDP and TCP and the room's relay
+   is the telemetry's to make once deployed: `coop_totals` on `/analytics`
+   holds each transport's sessions, round trips, rollback depths, frame work and
+   stalls.
+
 ### Milestone `M3`: Co-op replays & boards
 
-1. **Files**: `crimson-core/host/replay.inc`, `crimson-core/host/watch.inc`,
-   `src/crimson/replay/ranked.py`, `service/` (upload, boards, run page),
-   `docs/rewrite/ranked-rules.md`.
+1. **Files**: `crimson-core/host/replay.inc`, `crimson-core/host/coop_ranked.inc`,
+   `crimson-core/host/ranked.inc`, `src/crimson/replay/ranked.py`,
+   `service/src/runs.ts`, `service/src/verify.ts`, `service/src/coop.ts`,
+   `docs/rewrite/ranked-rules.md`, `docs/formats/replay.md`.
 
-2. **Changes**: `player_count`-wide replay record, verify and watch in
-   crimson-core; the ranked profile with `player_count = 2` and the co-op
-   boards in `ranked.py` and the service; uploads carrying both players'
-   signatures; run pages and watch replays for 2-player runs. Rules that keep
+2. **Changes**: a `player_count`-wide replay record in crimson-core; the ranked
+   profile with `player_count = 2` and the co-op boards in `ranked.py` and the
+   service; uploads carrying both players' signatures. These rules keep
    `replay.inc`, `service/src/verify.ts` and Python's `build_run_result`
    byte-identical:
 
-   - **Perk commands**: `replay.inc` writes `player_index: perk_picker` on
-     `perk_menu_open` and `perk_pick` (today it hardcodes `0`,
-     `crimson-core/host/replay.inc:213`).
+   - **Perk commands**: `replay.inc` writes each `perk_menu_open` and
+     `perk_pick` with `player_index` set to the seat whose request it was (the
+     session's pickers), `0` in a one-player run.
    - **2P quest time**: the health bonus truncates player 0's health before
      `* 50.0f` and player 1's after it,
      `(int)((int)p0.health * 50.0f) + (int)(p1.health * 50.0f)`
      (`quest_results_screen_update.cpp:190-195`, `src/crimson/quests/results.py`).
      The results screen rewrites `player_state_table[0].health` in place, so
-     `replay_result()` runs before it, as `live_end()` already does.
+     `replay_result()` runs before it, as `live_end()` does.
    - **`players[1]` in `RunResult`**: native keeps XP on player 0 and weapon
      usage in one global table, so player 1's `experience` is `0`, its
      `health` is `player_state_table[1].health`, and its most used weapon comes
@@ -1820,14 +2043,54 @@ and messages, repairs and the records they carried, and the round trip.
      only when the best slot names no weapon
      (`most_used_weapon_id_for_player`, `src/crimson/weapon_runtime/assign.py`).
    - **Ranked aim checks**: the service's `TickMonitor`
-     (`service/src/verify.ts:129-155`) tracks the 2P camera as Python's
+     (`service/src/verify.ts`) tracks the 2P camera as Python's
      `RankedTickMonitor` does (the midpoint of the living players,
-     `camera_update.cpp:57-80`, kept while nobody lives, `:78-79`) and checks both
-     `input(tick, 0)` and `input(tick, 1)` with a move target per player.
+     `camera_update.cpp:57-80`, kept while nobody lives, `:78-79`) and checks
+     every player's input each tick, with a move target per player.
 
 3. **Gate**: a co-op `.crd` recorded by two browsers verifies in the service,
    in `crimson replay verify`, and in the Python port, and ranks on its co-op
    board crediting both players.
+
+4. **Status**: ranked co-op has landed, end to end; watching a co-op replay
+   has not. The service verifies a 2-player run on crimson-core as it does a
+   one-player run, every seat's controls and aim included, and ranks it on
+   `survival-coop`, `quests-coop` or `quests-hardcore-coop` under both
+   players' names. It takes a co-op upload only with a signature from each
+   seat's key that the replay records (`seat_keys`, replay format 34) and only
+   when the room issued the run's seed to those keys in that seat order
+   (`coop_runs`); a second upload of the same run gets `409`
+   ([leaderboard identity](leaderboard-identity.md#co-op-runs)). The game's
+   side (Section 5.3): each seat proves its key to the room, the Host's runs
+   start on the room's seed with the seats' keys in `START_RUN`'s header, each
+   peer signs its own seat at the end screen's name entry and checks its
+   partner's signature, and both outboxes queue the same entry with both
+   signatures. The high scores' online tables for two players are the co-op
+   boards. The run's page shows both names, its card and player one's timeline
+   (the timeline reads player one only).
+
+   `checks/game_coop_live.mjs` plays ranked runs between two originals over
+   the lossy pipe, under rollback and under the `M2` profiles (60 ± 20 ms with
+   1% loss among them): both machines must save byte-identical replays that
+   `crimson replay verify` accepts as 2-player runs with each perk command its
+   picker's, record the seats' proven keys and a seed the room issued them,
+   and queue the same outbox entry with both seats' valid signatures; a header
+   whose keys the room did not attest, or a page without ranked play, leaves
+   the run unsigned and unqueued. `checks/coop_browser.mjs` plays a ranked
+   Survival run between two browsers against `wrangler dev`: both pages upload
+   it, one hears `201` and the other `409`, and `/api/survival/coop` lists the
+   pair under both names. The service's worker tests verify the co-op vectors
+   and cover the refusals (a missing or misplaced seat signature, keys the room
+   did not issue the seed to, a replay without `seat_keys`).
+
+   Remaining: crimson-core plays one-player replays only. Its replay reader
+   refuses a 2-player `.crd` with "This run needs the Python port"
+   ([replay viewer](replay-viewer.md#watch)), so a co-op row's Watch in the
+   game's high scores, and the Watch on the site's co-op boards and run pages
+   (which opens the game at `/play/?watch=<run>`), show that note instead of
+   the run. The replay downloads from its run page and plays in the Python
+   port (`crimson replay play`). Watching co-op runs needs the reader and the
+   viewer widened to `player_count` inputs per tick, with the 2P camera.
 
 ### Mandatory acceptance matrix (`checks/game_coop.mjs` & `M1`/`M2`)
 

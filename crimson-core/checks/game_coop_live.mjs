@@ -2,20 +2,22 @@
 // docs/rewrite/network-coop.md, Phase B): two games boot, each from its own copy
 // of a game directory, and Node carries their sessions' messages between them
 // over the checks' lossy network (coop_link.mjs), as the transport does
-// (client/web/coop.js). The machines differ in all a player may set: the Host
-// plays at 60 frames a second with sound and music on, seven in-game tunes, the
-// highest detail, a mouse and keys it moved (ESDF, Q for the perk menu) and
-// some progress of its own; the Guest at 144 with sound and music off, the
-// lowest detail, no gore, info texts or direction arrows, a pad on the pad
-// profile and a fresh save. Its frames stutter once; the Host's packets are lost
-// in a burst once. The system clocks follow the frames' clock, so the original's
-// own randomness, which they seed, comes out the same each time. Both pages
-// offer ranked play, but for one start of the Guest's game, inside another
-// site's page as it were; once both pages take their seats in the room (Node's
-// stand-in for the service's, from the custom quest on), each proves its key on
-// its socket's challenge, which Node verifies, and the room issues the Host's
-// runs their seeds once both seats' keys stand. Each session opens on both
-// machines as the transport opens one:
+// (client/web/coop.js). Their runs roll back (M2): records two ticks ahead
+// (more on a long round trip), up to eight ticks run on predictions. The
+// machines differ in all a player may set: the Host plays at 60 frames a second
+// with sound and music on, seven in-game tunes, the highest detail, a mouse and
+// keys it moved (ESDF, Q for the perk menu) and some progress of its own; the
+// Guest at 144 with sound and music off, the lowest detail, no gore, info texts
+// or direction arrows, a pad on the pad profile and a fresh save. Its frames
+// stutter once; the Host's packets are lost in a burst once. Each machine's
+// clock keeps to the network's time, and the system clocks follow it, so the
+// original's own randomness, which they seed, comes out the same each time.
+// Both pages offer ranked play, but for one start of the Guest's game, inside
+// another site's page as it were; once both pages take their seats in the room
+// (Node's stand-in for the service's, from the custom quest on), each proves
+// its key on its socket's challenge, which Node verifies, and the room issues
+// the Host's runs their seeds once both seats' keys stand. Each session opens
+// on both machines as the transport opens one:
 //
 // Runs alone. The Guest's machine is in the tutorial as a session opens: a
 // Survival run the Host starts waits for it until the Host gives up. Its game
@@ -89,23 +91,34 @@
 // Host's menus are its own again: its quest list starts none of the quests the
 // session unlocked.
 //
+// Bounded rollback under the network's profiles: 10 ms one way; 30 ± 5 ms; 50
+// ± 15 ms with bursts of lost packets; 60 ± 20 ms with 1% lost; 120 ± 10 ms. A
+// Survival run under each that begins ahead on one machine and stalls 300 ms on
+// the other, where a perk is picked from either seat while the other machine
+// predicts, the game pauses and resumes from either seat, the window narrows as
+// 15 minutes into a run (past which the game keeps 59 ticks a second at 120 ms,
+// its input delay longer), and the run ends in a team wipe, whose names both
+// players sign under 60 ms with loss, or a leave from the pause banner; then
+// team wipes until one a correction revised.
+//
 // Quests. The Host starts the first quest from its quest list, which both
-// players clear; both save their names. The Guest's high scores Play a game
-// starts nothing; the Host's Play Next starts the next quest, which takes the
-// Guest's screen from the high scores. Both stand still until it fails; the
-// Host's Play Another takes both to the quest list, where a link to a replay
-// comes to the Host's machine: it waits for the session's end, through its
-// runs. The Host's number key starts the first quest again, another key as the
-// screen fades starting nothing more. Both stand still until it fails, and the
-// Host's Enter twice plays it again once. Then the Host's keys press Main Menu,
-// and the Guest's Play Again right after starts nothing: the session ends
-// there, and the link's replay plays.
+// players clear under 60 ± 20 ms with loss; both save their names. The Guest's
+// high scores Play a game starts nothing; the Host's Play Next starts the next
+// quest, which takes the Guest's screen from the high scores. Both stand still
+// until it fails; the Host's Play Another takes both to the quest list, where a
+// link to a replay comes to the Host's machine: it waits for the session's end,
+// through its runs. The Host's number key starts the first quest again, another
+// key as the screen fades starting nothing more. Both stand still until it
+// fails, and the Host's Enter twice plays it again once. Then the Host's keys
+// press Main Menu, and the Guest's Play Again right after starts nothing: the
+// session ends there, and the link's replay plays.
 //
 // A last run, which a session opening while the Host's machine watches the
 // replay starts from the Guest's, the seats swapped (practice taking over none
 // of the replay meanwhile), in which the Host's window mode changes (which
 // saves the configuration), and which the Guest's Alt+Q quits (which saves it
-// too) and the Host's window closes.
+// too) and the Host's window closes, each machine's replay ending on the last
+// tick it confirmed.
 //
 // The first Survival run plays the room's seed, which reaches the Guest's page,
 // with both seats' keys, only after the Host's START_RUN: the Guest's screen
@@ -126,11 +139,14 @@
 // Every tick either machine confirmed has the same state hash, bake digest and
 // terrain digest on both, and the engine with both seats local
 // (game_coop_start's solo mode, headless) gives the same for each tick from the
-// records the machines played; both machines saved the same replay byte for
-// byte, which the Python port verifies as a 2-player run (each perk command its
-// picker's); each mouse aim the first tick took reads through the two players'
-// midpoint, in either seat; neither player's save or settings took anything
-// from the sessions, whatever saved them.
+// records the machines played, inside an original with the Host's tunes the
+// music the Host's machine played too; both machines saved the same replay byte
+// for byte, which the Python port verifies as a 2-player run (each perk command
+// its picker's); after every frame each machine shows the newest tick it ran, a
+// perk screen or an end screen only once that tick is confirmed; each mouse aim
+// the first tick took reads through the two players' midpoint, in either seat;
+// neither player's save or settings took anything from the sessions, whatever
+// saved them.
 //
 //   node crimson-core/checks/game_coop_live.mjs <game directory> [game.wasm]
 import assert from "node:assert/strict";
@@ -140,7 +156,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
-import { Link, prng } from "./coop_link.mjs";
+import { coopStats, Link, prng } from "./coop_link.mjs";
 import { CONFIG_BYTES, CORE, field, init, INPUT_BYTES, names, state } from "./engine.mjs";
 import { loadGame } from "./game_compare.mjs";
 import { bootGame, INPUT, sevenTunes } from "./game_host.mjs";
@@ -158,7 +174,9 @@ const STATUS = {
   started: 2,
   paused: 4,
   waiting: 8,
+  picker: 16,
   leaving: 32,
+  ended: 64,
   desynced: 128,
   starting: 512,
   signed: 2048,
@@ -199,17 +217,15 @@ const banner = (count, i) => [
   Math.floor((768 - 104) / 2) + 74,
 ];
 // A tick's digests (host/coop.inc), which both machines and the solo engine must agree on; not its music's, which
-// names the tracks this machine loaded.
-const DIGESTS = ["hash", "bake", "terrain"];
+// names the tracks this machine loaded: the Host's machine, whose music plays, must agree on that with its run played
+// again inside an original that loaded its tunes.
+const DIGESTS = ["hash", "bake", "terrain"], HEARD = [...DIGESTS, "music"];
 // The record a tick ran with (host/coop.inc CoopInput): a seat's input (its aim 8 bytes in, its flag word 16, with
 // the movement and aim schemes at bits 9 and 13), then its request. Each machine's schemes: the Host's static
 // movement and mouse aim, the Guest's pad profile.
 const RECORD_BYTES = INPUT_BYTES + 1;
 const schemes = (record) => `${(record.readUInt32LE(16) >> 9) & 7}/${(record.readUInt32LE(16) >> 13) & 7}`;
-// CoopStats (host/coop.inc): its double_opens, and its wire's lost ticks packets.
-const DOUBLE_OPENS = 14, LOST = 28;
-const stat = (peer, i) => new Int32Array(peer.g.memory.buffer, peer.g.game_coop_stats(), 32)[i];
-const ASK_OPEN = 1;
+const ASK_OPEN = 1, OPEN = 8;
 
 // A link's replay of one player's run, in the Guest's game directory.
 const ROOT = new URL("..", CORE).pathname, LINKED = "watched/linked.crd";
@@ -283,15 +299,18 @@ const peers = [0, 1].map((seat) => {
   return Object.assign(peer, boot(peer, 0));
 });
 const [host, guest] = peers;
-// A machine's game starting, its first frame at `at`, with the leaderboard on as the site's page has it, or
-// `leaderboard` "framed" as inside another site's page.
+// A machine's game starting, its first frame at `at`. Its clock keeps to the network's time (`zero` the network's
+// time its clock started from), however often the game reads it, unless reads alone carried it past that (the
+// replay viewer's preparing pass reads it until its time is up): it goes on from there. With the leaderboard on as the
+// site's page has it, or `leaderboard` "framed" as inside another site's page.
 function boot(peer, at, leaderboard = true) {
   const run = bootGame(gameWasm, peer.directory, peer.seat + 1, { clocks: true, leaderboard });
-  return { run, g: run.game, at: at + peer.seat * 3, last: at + peer.seat * 3 - 16, frames: 0, gone: false,
-    held: new Set(), ticks: new Map(), top: -1, config: null, first: null, offered: -1 };
+  return { run, g: run.game, at: at + peer.seat * 3, zero: at + peer.seat * 3 - 16 - run.clock, frames: 0,
+    gone: false, held: new Set(), ticks: new Map(), top: -1, config: null, first: null, offered: -1 };
 }
 // What a machine's game drew and played (its host calls but the clock's): none while it stops in the background.
-const drawn = (peer) => Object.entries(peer.run.calls).reduce((n, [name, count]) => n + (name === "time_ms" ? 0 : count), 0);
+const drawn = (peer) =>
+  Object.entries(peer.run.calls).reduce((n, [name, count]) => n + (["time_ms", "clock_ms"].includes(name) ? 0 : count), 0);
 
 // The records each confirmed tick ran with and its digests, while the engine's ring holds them, and the run's
 // configuration as its first tick ran.
@@ -307,20 +326,36 @@ function keep(peer) {
     const used = [0, 1].map((seat) =>
       Buffer.from(new Uint8Array(g.memory.buffer, g.game_coop_used(t, seat), RECORD_BYTES)),
     );
-    peer.ticks.set(t, { used, digests: DIGESTS.map((name) => g[`game_coop_${name}_at`](t)) });
+    peer.ticks.set(t, { used, digests: HEARD.map((name) => g[`game_coop_${name}_at`](t)) });
   }
+}
+
+// What a machine shows of a co-op run after each frame: the newest tick it ran, never one a rollback took back; its
+// perk screen only on the confirmed state after the tick its request opened the menu on; an end screen only once
+// the run's last tick is confirmed.
+const ENDS = [GAME_OVER, QUEST_RESULTS, QUEST_FAILED];
+function shows(peer, was) {
+  const { g } = peer, now = screen(peer), s = status(peer);
+  if (!(s & STATUS.started)) return;
+  assert.equal(g.game_coop_drawn(), g.game_coop_next() - 1, `machine ${peer.seat} shows a tick taken back`);
+  if (was !== GAMEPLAY || now === was) return;
+  if (now === PERK_SELECTION)
+    assert.ok(s & STATUS.picker && confirmed(peer) === g.game_coop_next() - 1, `machine ${peer.seat}'s perk screen`);
+  if (ENDS.includes(now)) assert.ok(s & STATUS.ended, `machine ${peer.seat}'s end screen before the run's end`);
 }
 
 // The two machines on the network: a frame of a peer takes the input `input` gives it (held keys, tapped keys,
 // the cursor as DirectInput motion, the left button, the pad), then sends what its session has to send. A frame
 // that produces this machine's record while its run has yet to run tick 0 keeps where the players start and the
-// cursor that record read.
+// cursor that record read. With `leads` kept, each of the Host's frames in a run notes how far its run is ahead of
+// the Guest's.
 class Machines extends Link {
   constructor() {
     super(SEED);
     this.peers = peers;
     this.loss = LOSS;
     this.input = () => ({});
+    this.leads = null;
   }
   // What `cut` names (a peer) never arrives; `forge` changes the Host's next START_RUN on its way. Each peer's last
   // RUN_SIGNED is its `word`.
@@ -332,12 +367,13 @@ class Machines extends Link {
     if (channel === 1 && bytes[0] === RUN_SIGNED) peer.word = bytes;
     if (this.cut !== peer) super.send(peer, channel, bytes);
   }
-  // A START_RUN (CoopType 2) arriving notes when, as does the room's word (channel "room"): a seed or a key.
+  // A START_RUN (CoopType 2) arriving notes when and the run's input delay (after its type and epoch), as does the
+  // room's word (channel "room"): a seed or a key.
   receive(peer, channel, bytes) {
     const { g, run } = peer;
     if (peer.gone) return;
     if (channel === ROOM) return heard(peer, bytes);
-    if (channel === 1 && bytes[0] === 2) peer.offered = this.now;
+    if (channel === 1 && bytes[0] === 2) [peer.offered, peer.delay] = [this.now, bytes[1 + 4]];
     const at = g.game_coop_rx(bytes.length);
     new Uint8Array(g.memory.buffer, at, bytes.length).set(bytes);
     g.game_coop_receive(channel, bytes.length, run.clock);
@@ -366,7 +402,9 @@ class Machines extends Link {
     for (let b = 0; b < 32; ++b) input.setUint8(INPUT.pad_buttons + b, press.includes(b) ? 0x80 : 0);
     const fresh = screen(peer) === GAMEPLAY && (status(peer) & STATUS.started) !== 0 && g.game_coop_next() === 0;
     const before = g.game_coop_produced(), spawn = fresh && starts(peer);
-    const dt = peer.at - peer.last;
+    const dt = Math.max(peer.at - peer.zero - run.clock, 1);
+    peer.zero = Math.min(peer.zero, peer.at - run.clock - dt);
+    const was = screen(peer);
     try {
       run.frame(dt);
     } catch (error) {
@@ -382,7 +420,9 @@ class Machines extends Link {
         this.send(peer, channel, new Uint8Array(g.memory.buffer, g.game_coop_tx_buffer(), size).slice());
     if (g.game_coop_room_ask()) this.seed(peer);
     keep(peer);
-    peer.last = peer.at;
+    shows(peer, was);
+    if (this.leads && peer === host && started())
+      this.leads.push([this.now, g.game_coop_next() - guest.g.game_coop_next()]);
     const pattern = FRAMES[peer.seat];
     peer.at += pattern[peer.frames++ % pattern.length];
   }
@@ -625,10 +665,24 @@ function player(peer) {
   return { cursor: aim, keys: [key], taps, button: firing };
 }
 
-// The solo engine, headless, which plays a run from the records the machines played.
-const solo = loadGame(gameWasm);
-// A run as `peer` played it to tick `last`: every tick's digests are the solo engine's from its records.
+// The solo engine, headless, which plays a run from the records the machines played; and for the Host's machine
+// inside an original booted afresh from a copy of the Host's game directory as it began, with its tunes.
+const headless = loadGame(gameWasm);
+const oracles = fs.mkdtempSync(path.join(os.tmpdir(), "crimson-coop-heard-"));
+process.on("exit", () => fs.rmSync(oracles, { recursive: true, force: true }));
+fs.cpSync(host.directory, path.join(oracles, "tunes"), { recursive: true });
+function afresh() {
+  const directory = fs.mkdtempSync(path.join(oracles, "run-"));
+  fs.cpSync(path.join(oracles, "tunes"), directory, { recursive: true });
+  const run = bootGame(gameWasm, directory, 3);
+  // The startup sequence ends after about 14 s.
+  for (let frame = 0; frame < 1000; frame++) run.frame(16);
+  return run.game;
+}
+// A run as `peer` played it to tick `last`: every tick's digests are the solo engine's from its records, and the
+// Host's machine's music what its run played without predictions.
 function replayed(peer, last) {
+  const [solo, names] = peer === host ? [afresh(), HEARD] : [headless, DIGESTS];
   init(solo, peer.config);
   assert.equal(solo.game_coop_start(-1, 2, 0, 1), 1);
   const write = (at, t, seat) =>
@@ -641,7 +695,7 @@ function replayed(peer, last) {
     }
     assert.equal(solo.game_coop_advance(1, 0), 1, `tick ${t} did not run alone`);
     const { digests } = peer.ticks.get(t);
-    DIGESTS.forEach((name, i) =>
+    names.forEach((name, i) =>
       assert.equal(digests[i], solo[`game_coop_${name}_at`](t), `machine ${peer.seat} tick ${t}: ${name}`),
     );
   }
@@ -706,7 +760,7 @@ function ended(outcome) {
     saved,
   );
   const replay_bytes = zlib.zstdDecompressSync(replay).length;
-  return { ticks: last + 1, commands, replay_bytes, lost: peers.map((p) => stat(p, LOST)) };
+  return { ticks: last + 1, commands, replay_bytes, lost: peers.map((p) => coopStats(p.g).wire.lost) };
 }
 // Both machines back on the main menu once a leave ended the session, each told who left.
 function left(leaver) {
@@ -1024,7 +1078,11 @@ click(host, PERK_SELECTION, PERK_CHOICE);
 settle(host, GAMEPLAY, idle, 100);
 tap(guest, RIGHT, A);
 left(guest);
-for (const peer of peers) assert.equal(stat(peer, DOUBLE_OPENS), 1, "a tie");
+// The tie: one tick both players' records asked for the menu on, on both machines.
+for (const peer of peers) {
+  const ties = [...peer.ticks.values()].filter(({ used }) => used.every((record) => record[INPUT_BYTES] === OPEN));
+  assert.equal(ties.length, 1, `machine ${peer.seat}'s ties`);
+}
 const second = ended("incomplete");
 assert.equal(second.commands, "PerkMenuOpenCommand:0 PerkPickCommand:0");
 
@@ -1223,6 +1281,217 @@ assert.deepEqual(peers.map(reason), [DISCONNECTED, PARTNER_GONE]);
 agreed();
 midpointAim();
 for (const peer of peers) verified(peer, confirmed(peer) + 1, "incomplete");
+// Bounded rollback (§3.3, M2) under the network's profiles: a Survival run each, which the Host's menus start, the
+// Host's machine stalling 250 ms as the Guest's run starts, so that run begins ahead. Both players fight, and at the
+// first level one asks for the perk menu (the Host's perk key under 10 ms and 50 ± 15 ms, the Guest's Triangle under
+// the others) and picks on its perk screen while the other machine's run predicts the picker's records. At tick 900
+// the Guest's frames stall 300 ms. Under 30 ± 5 ms the Guest pauses with Start at tick 400 and the Host resumes with
+// Escape; under 60 ± 20 ms with loss the Host pauses and the Guest's Start resumes. Under 50 ± 15 ms with bursts of
+// lost packets, which begin once the stall settled (a burst sets the runs apart as a stall does), and under
+// 120 ± 10 ms, where the Host's START_RUN puts the records further ahead (coop_live.inc coop_run_delay), the window
+// narrows 40 s into the run, as it does 15 minutes in. Once the pick is in and 1500 ticks are confirmed (2700 where
+// the window narrows, 3600 at 120 ms), the Guest pauses under 30 ± 5 ms and the Host's mouse presses the banner's
+// Leave; under the others both players die (dying, below). Under 60 ± 20 ms with loss both players then name the
+// run, which ranks: both machines queue the same upload of the replay of the run's confirmed end. At 120 ms the game
+// runs 59 ticks a second from a second past the narrowing to the run's end, the narrowed window and the longer delay
+// covering a one-way trip together.
+//
+// Each run ends as the others: the same digests on both machines and from the records, the same replays, verified.
+// Both machines ran ticks on predictions and rolled them back, none further than the window allows; the drift
+// adjustment brought the two runs together after the start and after the stall, each predicting about as deep as
+// the other; and every frame showed the newest tick run, a perk screen or an end screen only once its tick was
+// confirmed (Machines.frame), and the Host's machine's music what its run played without predictions (replayed).
+const PROFILES = [
+  { name: "10 ms", ms: 10, jitter: 2, picker: host },
+  { name: "30 ± 5 ms", ms: 30, jitter: 5, picker: guest, pause: { by: guest, resumer: host }, end: "leave" },
+  { name: "50 ± 15 ms, bursts", ms: 50, jitter: 15, bursts: { every: 4000, burst: 10 }, late: 40000, picker: host },
+  { name: "60 ± 20 ms, 1% loss", ms: 60, jitter: 20, loss: 0.01, picker: guest, pause: { by: host, resumer: guest }, ranked: true },
+  { name: "120 ± 10 ms", ms: 120, jitter: 10, late: 40000, ticks: 3600, picker: guest, paced: true },
+];
+const LOSSY = PROFILES[3];
+// The window, and how it narrows (host/coop.inc COOP_LATE_RMAX, COOP_LATE_MS); the most a rollback takes back
+// (COOP_LEAD).
+const RMAX = 8, LATE_RMAX = 4, LATE_MS = 900000, LEAD = 12;
+const START_STALL = 250, SETTLE = 4000;
+// The network as the sessions above had it, or as `profile` has it.
+const network = (profile) =>
+  Object.assign(machines, {
+    profile: { ms: profile?.ms ?? 40, jitter: profile?.jitter ?? 30 },
+    loss: profile ? profile.loss ?? 0 : LOSS,
+    bursts: profile?.bursts ? { ...profile.bursts, from: 0, at: Infinity } : null,
+    burst: null,
+    hitch: null,
+  });
+// The end of a run: the players stand among the creatures, unarmed, until one is a few hits from death; then it turns
+// from the nearest creature to it and back every 50 ms, and its machine's ticks packets go missing for a second and a
+// half: the other machine's run goes on with it going the way its last record to arrive went, and sometimes its
+// records, once they arrive, bring a death that run did not see, or take one back. Creatures in reach hit by their
+// own clocks, wherever the player turns, so about a quarter of the runs bring a team wipe a correction revised.
+const DYING = { below: 30, turn: 50, lost: 90 };
+function dying(peer) {
+  if (screen(peer) !== GAMEPLAY) return {};
+  state(peer.g);
+  const health = field(peer.g, `players[${peer.role}].health`, true);
+  if (health <= 0 || health >= DYING.below) return {};
+  if (peer.dying === null) {
+    peer.dying = time();
+    machines.burst = { from: peer.seat, at: time(), left: DYING.lost };
+  }
+  const { toward, away } = target(peer);
+  const way = Math.floor((time() - peer.dying) / DYING.turn) % 2 ? toward : away;
+  if (peer === guest) return { pad: { left: stick(way) } };
+  return { keys: [Math.abs(way[0]) > Math.abs(way[1]) ? (way[0] < 0 ? S : F) : way[1] < 0 ? E : D] };
+}
+// Both players die, then their names go in with the session closed, and both screens go to the menu; the run's
+// counters. A `ranked` run's names go in with the session open, both machines queuing the run, signed, and the
+// session's close takes both screens to the menu.
+function wipe(what, ranked = false) {
+  for (const peer of peers) peer.dying = null;
+  play(dying, () => peers.every((p) => screen(p) === GAME_OVER), `${what}: the team's death`);
+  const result = ended("death");
+  const counted = peers.map((p) => coopStats(p.g));
+  if (ranked) {
+    const file = newest(host);
+    assert.deepEqual(header(file).seat_keys, [room.keys[0], room.keys[1]], `${what}: the seats' keys`);
+    settle(guest, GAME_OVER);
+    tap(guest, DOWN, A);
+    settle(host, GAME_OVER);
+    tap(host, key(ENTER));
+    play(idle, () => peers.every((p) => status(p) & STATUS.signed), `${what}: both names`);
+    queued(file);
+  }
+  for (const peer of peers) assert.equal(peer.g.game_coop_disconnect(DISCONNECTED), 1);
+  machines.flights = [];
+  if (ranked) {
+    play(idle, () => peers.every((p) => screen(p) === MAIN_MENU), `${what}: the menus`);
+    return { result, counted };
+  }
+  settle(guest, GAME_OVER);
+  tap(guest, DOWN, A);
+  play(idle, () => screen(guest) === MAIN_MENU, `${what}: the Guest's name and the menu`);
+  settle(host, GAME_OVER);
+  tap(host, key(ENTER));
+  play(idle, () => screen(host) === MAIN_MENU, `${what}: the Host's name and the menu`);
+  return { result, counted };
+}
+// How far apart the two runs were (the Host's next tick against the Guest's) over `ms` from `from`: on average, and
+// at most.
+function apart(from, ms) {
+  const diffs = machines.leads.filter(([at]) => at >= from && at < from + ms).map(([, diff]) => Math.abs(diff));
+  assert.ok(diffs.length > 0, "no frames to measure");
+  return { mean: diffs.reduce((a, b) => a + b) / diffs.length, most: Math.max(...diffs) };
+}
+const profiled = [];
+for (const profile of PROFILES) {
+  network(profile);
+  for (const peer of peers) peer.g.game_coop_late(profile.late ?? LATE_MS);
+  connect();
+  click(host, MAIN_MENU, PLAY_GAME);
+  click(host, PLAY_GAME_MENU, SURVIVAL);
+  play(idle, () => status(guest) & STATUS.started, "the Guest's start");
+  const stall = { peer: host, from: time(), to: time() + START_STALL };
+  machines.hitch = stall;
+  play(idle, started, "the run's start");
+  machines.leads = [];
+  const framed = peers.map((p) => p.frames);
+  picks.fill(0);
+  const { picker } = profile;
+  let pause = profile.pause && { ...profile.pause, at: 400, since: 0 }, hitch = null;
+  // The Host's confirmed tick by the network's time, frame by frame.
+  const paced = [];
+  script = (peer) => {
+    const taps = [];
+    if (peer === host) paced.push([time(), confirmed(host)]);
+    if (!hitch && confirmed(host) >= HITCH.at) {
+      hitch = machines.hitch = { peer: guest, from: time(), to: time() + HITCH.ms };
+      if (machines.bursts) machines.bursts.at = hitch.to + SETTLE + 1000;
+    }
+    if (pause && !pause.since && peer === pause.by && confirmed(host) >= pause.at) {
+      pause.since = peer.at;
+      taps.push(ESCAPE);
+    } else if (pause?.since && peer === pause.resumer && status(peer) & STATUS.paused && peer.at - pause.since > 1000) {
+      taps.push(ESCAPE);
+      pause = null;
+    }
+    const asks = peer === picker && !picks[peer.role] && !(status(peer) & STATUS.paused);
+    if (asks && target(peer).pending > 0 && peer.frames % 30 === 0) taps.push(Q);
+    return { taps };
+  };
+  const ticks = profile.ticks ?? (profile.late ? 2700 : 1500);
+  play(
+    player,
+    () => peers.every((p) => confirmed(p) >= ticks && screen(p) === GAMEPLAY) && picks[picker.role] && !pause && hitch,
+    `${profile.name}: ${ticks} confirmed ticks and the pick`,
+  );
+  assert.ok(time() > hitch.to + SETTLE + 1000, `${profile.name}: the stall settled`);
+  // Ticks a second from a second past the narrowing on.
+  let pace;
+  if (profile.paced) {
+    const [from, to] = [paced.find(([, t]) => t >= ((profile.late + 1000) * 60) / 1000), paced.at(-1)];
+    pace = +(((to[1] - from[1]) * 1000) / (to[0] - from[0])).toFixed(2);
+    assert.ok(pace >= 59, `${profile.name}: ${pace} ticks a second past the narrowing`);
+  }
+  // The play itself, before the run's end (a wipe loses packets on purpose).
+  const played = peers.map((p, i) => ({ ...coopStats(p.g), frames: p.frames - framed[i] }));
+  script = () => ({});
+  let result, counted;
+  if (profile.end === "leave") {
+    tap(guest, START);
+    play(idle, () => peers.every((p) => status(p) & STATUS.paused), `${profile.name}: the pause`);
+    let clicking = 0;
+    play((p) => (p === host ? { cursor: banner(2, 1), button: ++clicking > 30 } : {}), () => clicking > 40, "Leave");
+    left(host);
+    result = ended("incomplete");
+    counted = peers.map((p) => coopStats(p.g));
+  } else {
+    // The bursts above would take the place of the dying player's.
+    machines.bursts = null;
+    ({ result, counted } = wipe(profile.name, profile.ranked));
+  }
+  const by = picker.role;
+  assert.equal(result.commands, `PerkMenuOpenCommand:${by} PerkPickCommand:${by}`, `${profile.name}: the pick`);
+  for (const [i, s] of counted.entries()) {
+    const what = `${profile.name}: machine ${i}`;
+    assert.equal(s.depths.reduce((a, b) => a + b), s.rollbacks, `${what}'s rollbacks by depth`);
+    assert.ok(s.guessed_lead <= RMAX && s.max_depth <= LEAD, `${what} predicted ${s.guessed_lead} ahead`);
+    if (profile.late) {
+      assert.ok(s.late_ticks > 0 && s.late_lead <= LATE_RMAX, `${what} predicted ${s.late_lead} ahead, late`);
+      assert.ok(s.guessed_lead > LATE_RMAX, `${what} predicted no deeper than the late window before it`);
+    }
+  }
+  // The runs apart right after each stall, then together a second after settling.
+  const drift = [stall, hitch].map(({ to }) => ({ after: apart(to, 500), settled: apart(to + SETTLE, 1000) }));
+  for (const { after, settled } of drift)
+    assert.ok(after.most >= 4 && settled.mean <= 1.5 && settled.most <= 3, `${profile.name}: ${JSON.stringify(drift)}`);
+  // The longer delay only where the narrowed window would not cover a one-way trip with two ticks.
+  assert.equal(guest.delay > 2, !!profile.paced, `${profile.name}: an input delay of ${guest.delay}`);
+  const stats = counted.map(({ wire, ...s }) => s);
+  profiled.push({ profile: profile.name, ticks: result.ticks, delay: guest.delay, drift, pace, played, stats });
+}
+// Rollbacks under every profile but the nearest.
+for (const { profile, stats } of profiled.slice(1)) assert.ok(stats[0].rollbacks && stats[1].rollbacks, `${profile}`);
+// A death and a team wipe a correction revised: until a run brought one, more Survival runs under 60 ± 20 ms with
+// loss end as those above, the players standing from the start, 20 at most. No late input brings one by itself: a
+// guess runs at most eight ticks past the last confirmed one, and in that time a creature in reach hits by its own
+// clock whichever way the player turns, so whether the guessed or the real way takes the last player out of reach
+// rests on a few pixels of the creatures' own chase; and a perk request, the one input that stops play, opens its
+// menu between two ticks that both run. The search is deterministic, the network seeded and the machines' clocks the
+// network's, so it plays the same runs each time.
+const sum = (name) => profiled.reduce((n, { stats }) => n + stats[0][name] + stats[1][name], 0);
+network(LOSSY);
+for (let n = 1; !sum("revised_wipes") && n <= 20; ++n) {
+  connect();
+  click(host, MAIN_MENU, PLAY_GAME);
+  click(host, PLAY_GAME_MENU, SURVIVAL);
+  play(idle, started, "the run's start");
+  const { result, counted } = wipe(`wipe ${n}`);
+  profiled.push({ profile: LOSSY.name, ticks: result.ticks, stats: counted.map(({ wire, ...s }) => s) });
+}
+const revised = [sum("revised_deaths"), sum("revised_wipes")];
+assert.ok(revised.every((n) => n > 0), `revised deaths and wipes: ${revised}`);
+network(null);
+for (const peer of peers) peer.g.game_coop_late(LATE_MS);
+
 // The Host's menus are its own again: its panel lays out its own progress, and its quest list starts no quest
 // past its fourth (key 9 asks for the ninth).
 click(host, MAIN_MENU, PLAY_GAME);
@@ -1296,9 +1565,11 @@ click(host, PLAY_GAME_MENU, OWN_QUESTS);
 settle(host, QUEST_SELECT);
 
 // Quests. A session opens while the Host's quest list shows, and its number key starts the first quest; both
-// players clear it. On the results (a few seconds reveal the final time first) the Guest's pad saves its name and
-// the Host's Enter its own. The Guest's pad opens the high scores, the third button, whose Play a game starts
-// nothing; the Host's Enter on Play Next, the first, starts the second quest, and the Guest's screen comes to it.
+// players clear it, under 60 ± 20 ms with loss, both machines rolling back. On the results (a few seconds reveal the
+// final time first) the Guest's pad saves its name and the Host's Enter its own. The Guest's pad opens the high
+// scores, the third button, whose Play a game starts nothing; the Host's Enter on Play Next, the first, starts the
+// second quest, and the Guest's screen comes to it.
+network(LOSSY);
 connect();
 settle(host, QUEST_SELECT);
 tap(host, key(ONE));
@@ -1306,6 +1577,9 @@ play(idle, started, "the first quest's start");
 play(player, () => peers.every((p) => screen(p) === QUEST_RESULTS), "the first quest's end");
 const quest = ended("quest_completed");
 const questFile = newest(host);
+const lossy = peers.map((p) => coopStats(p.g).rollbacks);
+assert.ok(lossy.every((n) => n > 0), `the quest's rollbacks: ${lossy}`);
+network(null);
 settle(guest, QUEST_RESULTS, idle, 5000);
 tap(guest, DOWN, A);
 tap(host, key(ENTER));
@@ -1384,6 +1658,9 @@ windowMode(host);
 play((p) => (p === guest ? { keys: [ALT, Q] } : {}), () => guest.gone, "the Guest's Alt+Q");
 host.g.game_close();
 play(idle, () => host.gone, "the Host's close");
+// Each machine's replay of the run it quit ends on the last tick it confirmed, its result that tick's, whatever it
+// ran past it on predictions.
+for (const peer of peers) verified(peer, confirmed(peer) + 1, "incomplete");
 // Neither save nor either player's settings took anything from the sessions: every save wrote each player's own.
 for (const peer of peers) {
   peer.g.game_exit();
@@ -1396,4 +1673,32 @@ for (const entry of entries.flat()) uploadable(entry);
 for (const [name, bytes] of entries[0])
   assert.ok(entries[1].some(([other, them]) => other === name && them.equals(bytes)), `the Guest's ${name}`);
 const ranked = entries.map((each) => each.length);
-console.log(JSON.stringify({ first, second, quest, failed, again, retry, stalled, desync: desync[0], seeds: room.seeds.length, ranked }));
+// Under each profile: the ticks, the input delay, how far apart the runs were after each stall and once settled, and
+// each machine's rollbacks by depth, the deepest guess, frames that stalled, the most ticks a frame ran again, and
+// revised deaths; and for the play before the run's end, each machine's ticks run, ticks run again, frames, frames
+// that stalled and rollbacks by depth, and from those the columns of the spec's profile table
+// (docs/rewrite/network-coop.md §3.1): each machine's rollbacks per minute of ticks run (3,600), their mean depth,
+// the deepest of either machine's, ticks run again per tick run, and the share of frames that stalled (%).
+const rolled = (s) => s.depths.reduce((a, b) => a + b, 0);
+const m2 = profiled.map(({ profile, ticks, delay, drift, pace, played, stats }) => ({
+  profile,
+  ticks,
+  delay,
+  pace,
+  played: played?.map((s) => [s.ticks, s.resimulated, s.frames, s.stalled_frames, s.depths]),
+  table: played && {
+    per_minute: played.map((s) => Math.round((rolled(s) * 3600) / s.ticks)),
+    mean_depth: played.map((s) => +(s.depths.reduce((n, count, i) => n + count * (i + 1), 0) / rolled(s)).toFixed(1)),
+    deepest: Math.max(...played.map((s) => s.depths.findLastIndex(Boolean) + 1)),
+    again_per_tick: played.map((s) => +(s.resimulated / s.ticks).toFixed(2)),
+    stalled_pct: played.map((s) => +((100 * s.stalled_frames) / s.frames).toFixed(1)),
+  },
+  drift: drift?.map(({ after, settled }) => [after.most, +settled.mean.toFixed(2)]),
+  depths: stats.map((s) => s.depths),
+  guessed: stats.map((s) => s.guessed_lead),
+  late: stats.map((s) => s.late_lead),
+  stalled: stats.map((s) => s.stalled_frames),
+  resimulated: stats.map((s) => s.frame_resimulated),
+  revised: stats.map((s) => [s.revised_deaths, s.revised_wipes]),
+}));
+console.log(JSON.stringify({ first, second, quest, failed, again, retry, stalled, desync: desync[0], seeds: room.seeds.length, ranked, m2 }));

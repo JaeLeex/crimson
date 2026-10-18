@@ -1,9 +1,23 @@
 // Embedded by client/build.py after PLAY_ANALYTICS (analytics.json), which the
-// service shares. Daily tokens and anonymous totals travel in separate
-// requests; neither carries a game key, account, URL or recording.
+// service shares. Daily tokens, anonymous totals and co-op session summaries
+// travel in separate requests; none carries a game key, account, room, URL or
+// recording.
+// The kind of transport a co-op session ran over, from coop.js's name for it: the room's relay (ws-relay), or the
+// WebRTC pair's two candidate types, "<local>/<remote>", the local one relay-<protocol> when this page's own TURN
+// allocation names its protocol. Through TURN when either end is a relay: turn-udp or turn-tcp by this page's own
+// relay's protocol, turn when this page cannot tell (only the partner relays, over a leg this page never sees, or
+// its relay names no protocol); direct when neither is; unknown before the pair was read ("webrtc").
+function coopTransport(transport) {
+  if (transport === "ws-relay") return transport;
+  const [local, remote] = transport?.split("/") ?? [];
+  if (!remote) return "unknown";
+  if (local === "relay-udp") return "turn-udp";
+  if (local === "relay-tcp" || local === "relay-tls") return "turn-tcp";
+  return local.startsWith("relay") || remote === "relay" ? "turn" : "direct";
+}
 function createPlayAnalytics() {
   // MODES is indexed by game_play_mode (host/session.inc).
-  const { token: TOKEN, disabled: DISABLED, modes: MODES, max_runs: MAX_RUNS, max_seconds: MAX_SECONDS } = PLAY_ANALYTICS;
+  const { token: TOKEN, disabled: DISABLED, modes: MODES, max_runs: MAX_RUNS, max_seconds: MAX_SECONDS, coop: COOP } = PLAY_ANALYTICS;
   const date = () => new Date(Date.now()).toISOString().slice(0, 10);
   let day = date(), pending = { ready: 0, sessions: 0, engaged: 0 }, modes = new Map();
   let previous = 0, previousAt = performance.now(), lastFlush = previousAt, lastRun = 0;
@@ -95,6 +109,25 @@ function createPlayAnalytics() {
     previous = mode;
     if (stopped || pending.sessions || pending.engaged || now - lastFlush >= 60000) flush();
   }
+  // A co-op session's summary as it ends (shell.html), best effort like the totals: the kind of transport it last
+  // ran over (coopTransport), its round trip's bucket, its seconds in runs, whether it desynced, and the game's
+  // counters (host/coop.inc CoopSessionStats): frames whose due ticks all waited, rollbacks by depth and frames by
+  // the time their ticks took. As the service bounds a summary by the seconds it claims (at most max_seconds, a
+  // rollback a tick, max_rate frames a second), counts past those bounds go down in proportion.
+  function coop({ transport, rtt, ticks, desync, stalled, depths, frames }) {
+    if (!enabled()) return;
+    const { rtt_ms: RTT_MS, max_seconds: MAX_COOP_SECONDS, max_rate: MAX_RATE } = COOP;
+    const seconds = Math.min(Math.ceil(ticks / 60), MAX_COOP_SECONDS);
+    const fit = (counts, limit) => {
+      const sum = counts.reduce((a, b) => a + b, 0);
+      return sum <= limit ? counts : counts.map((n) => Math.floor((n * limit) / sum));
+    };
+    void send("/api/analytics/coop", {
+      day: date(), transport: coopTransport(transport), rtt: RTT_MS.filter((ms) => rtt >= ms).length,
+      seconds, desync: desync ? 1 : 0, stalled: Math.min(stalled, seconds * MAX_RATE),
+      depths: fit(depths, seconds * 60), frames: fit(frames, seconds * MAX_RATE),
+    }).catch(() => {});
+  }
   function ready() {
     if (!enabled() || readySent) return;
     readySent = true;
@@ -104,5 +137,5 @@ function createPlayAnalytics() {
   document.addEventListener("visibilitychange", () => { if (document.hidden) { activity(0, 0); flush(); } });
   window.addEventListener("pagehide", () => { activity(0, 0); flush(); });
   window.addEventListener("storage", () => { if (!enabled()) clear(); });
-  return { ready, activity, flush };
+  return { ready, activity, flush, coop };
 }

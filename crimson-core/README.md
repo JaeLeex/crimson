@@ -178,9 +178,10 @@ The game module's co-op engine ([`host/coop.inc`](host/coop.inc)) plays every
 co-op bot stream with both players local, splitting its perk commands into the
 players' requests, and must match the plain run word for word. It then plays
 each again through forced rollbacks of up to 12 ticks, at lockstep and at
-several rollback windows, delays and frame budgets, and every confirmed tick
-must keep the state hash, terrain bake, terrain and music digests and raw state
-of the plain pass. Every byte of the run's state must be in the hash or in the
+several rollback windows (one narrowing as 15 minutes into a Survival run),
+delays and frame budgets, and every confirmed tick must keep the state hash,
+terrain bake, terrain and music digests and raw state of the plain pass, every
+frame showing the newest tick run. Every byte of the run's state must be in the hash or in the
 engine's list of what it leaves out. One co-op scenario fills the effect pool
 under the ranked rules, freeing overflow entries at their own times. With
 `--live <game directory>` a few streams also play inside the original (from a
@@ -217,10 +218,11 @@ Two originals boot from their own copies of a game directory and play co-op
 sessions through the live session ([`host/coop_live.inc`](host/coop_live.inc)),
 their messages carried over the rollback check's seeded pipe
 ([`checks/coop_link.mjs`](checks/coop_link.mjs)) with a stutter and a lost
-burst, at 60 Hz against 144 Hz. The two differ in all a player sets: sound and
+burst, at 60 Hz against 144 Hz, their runs rolling back (two ticks of input
+delay, more on a long round trip, up to eight predicted). The two differ in all a player sets: sound and
 music, in-game tunes, detail and gore, key bindings, mouse and keys against a
-pad, and saved progress; the original's own randomness is seeded by the
-frames' clock, so every run comes out the same. First a session opens while one
+pad, and saved progress; each machine's clock keeps to the pipe's time and
+seeds the original's own randomness, so every run comes out the same. First a session opens while one
 machine is in the tutorial, plays a local two-player quest and plays a quest
 alone: each plays out on its own save, stopping in the background, and the last
 keeps its name entry; a custom quest's link waits for the session's end, and its
@@ -236,15 +238,24 @@ again at the end screens (a Play Again of the last session starting nothing in
 the new one), as the screen fades to a run (which then starts none) and
 mid-run, a leave as the screen fades to the next
 run, a transport that closes before a name entry, a lost connection with the
-seats swapped (the window in the background stopping after it), quests from the
+seats swapped (the window in the background stopping after it), a Survival
+run under each of five network profiles (10 ms one way to 60 ± 20 ms with
+loss, one with bursts of lost packets, and 120 ± 10 ms, where the game must keep
+59 ticks a second past the window's narrowing) with a perk picked from either
+seat while the other predicts, pauses, a stall on either machine, the window
+narrowing, a leave and team wipes (one both players sign, which both machines
+queue alike; then wipes until a correction revised one), quests from the
 Host's quest list through Play Next, the high scores' Play a game, Play Another
 (where a link to a replay waits for the session's end, through its runs), two
 quest keys and Play Again twice to a leave from the failed quest's screen, and
 a run both machines quit, which a session opening over that replay starts (no
 practice taking it over meanwhile). Every tick both machines confirm must have the
 same state hash and bake and terrain digests on both and from the engine
-replaying their records alone, both must save byte-identical replays that
-`crimson replay verify` accepts, every name must go to the two players' tables,
+replaying their records alone (and the Host's music that of its run played
+again without predictions), both must save byte-identical replays that
+`crimson replay verify` accepts, every frame must show the newest tick run and
+a perk or end screen only a confirmed one, two runs a stall set apart must come
+back together, every name must go to the two players' tables,
 the Host's menus must lose the session's unlocks when it ends, and neither
 player's settings or save may change, whatever saves them.
 
@@ -253,7 +264,7 @@ player's settings or save may change, whatever saves them.
 ```sh
 cd service && npm ci && npm run play && cd ..
 CRIMSON_CHROME=<chrome binary> \
-  node crimson-core/checks/coop_browser.mjs artifacts/assets [screenshot folder]
+  node crimson-core/checks/coop_browser.mjs artifacts/assets [screenshot folder] [game.wasm]
 ```
 
 The whole path between two browsers, locally and outside CI: `npm run play`
@@ -269,7 +280,10 @@ starts a new session with the new page, again over WebRTC. The host's menus star
 keys and mouse: each page's session must have the run started, no desync or
 error and its confirmed ticks advancing, and every confirmed tick both pages
 hold must have run with the same records and left the same state hash on both,
-each seat's records moving its player. The guest's tab goes to the background
+each seat's records moving its player. Then the guest's page sends late (its
+DataChannel sends held 60 ± 25 ms), and the host's game rolls back while both
+keep agreeing; meanwhile the host's page times its frames that ran ticks,
+drawing on, and the check prints their p50 and p99. The guest's tab goes to the background
 past the liveness timeout, which would end the session of a page that sent
 nothing, and the run goes on; a desync the guest's page makes closes both
 sessions and both panels say so; the host leaves its stopped run first and its
@@ -278,8 +292,11 @@ meanwhile, then a new session begins; in its run the host leaves from the
 pause banner, both panels say so, and neither address keeps the room. Last, a
 guest page without WebRTC plays a run with the host over the room's relay, then
 closes, which the host's game hears at once, and the host's game quits, which
-takes the co-op panel with it. It saves screenshots of the pages along
-the way (by default under the system's temporary folder).
+takes the co-op panel with it. The sessions the host's page played (on
+localhost, where the game reports analytics) must reach the local service's
+co-op totals by transport, the desync and the late sends' rollbacks among
+them. Last, the late game's costs run in Chrome (below). It saves screenshots
+of the pages along the way (by default under the system's temporary folder).
 
 `CRIMSON_CHROME` is a Chrome or Chromium binary with the new headless mode
 (`/Applications/Google Chrome.app/Contents/MacOS/Google Chrome` on macOS); the
@@ -289,6 +306,29 @@ visible: the background step brings another tab of the guest's window to the
 front with the guest's focus emulation off, a real hidden tab whose animation
 frames stop and whose timers slow to once a second. Wrangler keeps its state
 under the user's folder, so the check runs outside the command sandbox too.
+
+### Co-op costs
+
+```sh
+node crimson-core/checks/coop_cost.mjs [game.wasm] [--from 20] [--to 35] [--session 60]
+```
+
+What co-op's simulation costs late in a long two-player Survival run, the
+numbers in
+[network co-op §3.1](../docs/rewrite/network-coop.md#31-measurements-on-crimson-core-apple-m1-pro-wasm):
+a bot plays both players of the run a co-op session starts (the ranked profile,
+the original's bugs fixed) with their health held full, a plain run and the run
+through the co-op engine, and the check prints per-call p50/p99 of the plain
+step, the co-op tick, the slot capture and restore, the state hash and 8- and
+12-tick rollbacks over ticks run on a stand-in record (their bakes held) between
+`--from` and `--to` minutes of the run's time, the slot size and the engine's
+memory, the creature pool between `--from` and `--to` (the share of ticks with
+every slot in use, the fewest creatures any held) and the minute it first
+filled, the perks held at `--from`, then the work of frames that ran ticks, rollback depths and stalls over
+`--session` seconds at 60 and 144 Hz from `--to` on, with player two's records
+60 ± 20 ms late (the jitter seeded). The module runs headless: nothing draws,
+and no wire carries the records. `checks/coop_browser.mjs` runs the same
+`measure` in Chrome.
 
 ### Original executable
 
@@ -332,7 +372,7 @@ uv run --with wasmtime==49.0.0 python crimson-core/checks/wasmtime_check.py \
 The [probe](results/wasmtime.json) loads the exact `core.wasm` used by Node and
 the [service](../service/src/verify.ts) in
 [wasmtime-py](https://bytecodealliance.github.io/wasmtime-py/), compares the hash of every snapshot of a smoke set (one run per mode, bug
-policy and control family) and checks A/B/A resets in one instance, without
+policy, control family and player count) and checks A/B/A resets in one instance, without
 adding a project dependency; the matrix already compares every run between
 native and Node. The results record the module's hash and its linear memory.
 
