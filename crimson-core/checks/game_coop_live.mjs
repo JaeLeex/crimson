@@ -19,6 +19,15 @@
 // the Host's runs their seeds once both seats' keys stand. Each session opens
 // on both machines as the transport opens one:
 //
+// A room before the session. The Guest's machine, on its fresh save, opens a room
+// in the Host's seat and waits there for its partner: its menus show every
+// quest unlocked, and start no run alone, not its Tutorial nor the first quest
+// (key 1). Its quest list shows the Hardcore box, which it ticks, and stage V.
+// Its partner joins the room and a session opens: its key 0 starts quest 5.10,
+// hardcore, for both machines. The transport closes mid-run, and both pages
+// leave the room: the save keeps no unlock of the room's, and the Tutorial starts
+// alone again, below.
+//
 // Runs alone. The Guest's machine is in the tutorial as a session opens: a
 // Survival run the Host starts waits for it until the Host gives up. Its game
 // starts again for two local players, and plays the first quest by itself,
@@ -159,7 +168,7 @@ import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
 import { coopStats, Link, prng } from "./coop_link.mjs";
-import { CONFIG_BYTES, CORE, decode, field, init, INPUT_BYTES, names, state, step } from "./engine.mjs";
+import { config, CONFIG_BYTES, CORE, decode, field, init, INPUT_BYTES, names, state, step } from "./engine.mjs";
 import { loadGame, PRESENTATION } from "./game_compare.mjs";
 import { bootGame, INPUT, sevenTunes } from "./game_host.mjs";
 
@@ -169,8 +178,8 @@ if (!given) throw Error("usage: game_coop_live.mjs <game directory> [game.wasm]"
 // game_state_id_t, DirectInput scancodes, and the session's (host/coop_wire.inc).
 const MAIN_MENU = 0, PLAY_GAME_MENU = 1, PERK_SELECTION = 6, GAME_OVER = 7, QUEST_RESULTS = 8, GAMEPLAY = 9;
 const QUEST_SELECT = 11, QUEST_FAILED = 12, HIGHSCORES = 14;
-const KEYS = [0x01, 0x02, 0x03, 0x0a, 0x0f, 0x10, 0x12, 0x1c, 0x1f, 0x20, 0x21, 0x38];
-const [ESCAPE, ONE, TWO, NINE, TAB, Q, E, ENTER, S, D, F, ALT] = KEYS;
+const KEYS = [0x01, 0x02, 0x03, 0x0a, 0x0b, 0x0f, 0x10, 0x12, 0x1c, 0x1f, 0x20, 0x21, 0x38, 0xcd];
+const [ESCAPE, ONE, TWO, NINE, ZERO, TAB, Q, E, ENTER, S, D, F, ALT, ARROW_RIGHT] = KEYS;
 const STATUS = {
   connected: 1,
   started: 2,
@@ -210,6 +219,8 @@ const PERK_CHOICE = [150, 216], PAD_CURSOR = [1000, 740];
 // Quests; the high scores' Play a game.
 const PLAY_GAME = [240, 338], RANKED = [285, 489], SURVIVAL = [232, 372], OWN_QUESTS = [232, 322], FRESH_QUESTS = [232, 350];
 const PLAY_A_GAME = [190, 500];
+// The quest list's Hardcore box, which shows with the campaign's 40 quests unlocked.
+const HARDCORE = [323, 284];
 // A fresh save's Play Game panel lays out the Tutorial first, above Quests.
 const TUTORIAL = [232, 318];
 // A banner's `count` buttons across a 1024x768 frame (coop_banner): 145 wide and 16 apart, centred, 58 below the
@@ -798,6 +809,43 @@ function unansweredStart(input, check) {
   play(input, () => (check(), unanswered()), "the cancel");
 }
 
+// A room before the session. The Guest's machine opens a room in the Host's seat, its partner not there yet: its
+// fresh save's menus show every quest, and none of them starts a run alone. On the Play Game panel, which lays its
+// Tutorial out first, the Tutorial starts nothing; the quest list's key 1 starts nothing; its Hardcore box shows, and
+// the machine ticks it and goes to stage V, where key 0 starts nothing either.
+assert.equal(guest.g.game_coop_in_room(0), 1);
+const alone_before = guest.g.game_play_run();
+click(guest, MAIN_MENU, PLAY_GAME);
+click(guest, PLAY_GAME_MENU, TUTORIAL);
+hold(1000, () => screen(guest) === PLAY_GAME_MENU, "the Tutorial in a room");
+click(guest, PLAY_GAME_MENU, FRESH_QUESTS);
+settle(guest, QUEST_SELECT);
+tap(guest, key(ONE));
+hold(1000, () => screen(guest) === QUEST_SELECT, "the first quest in a room");
+click(guest, QUEST_SELECT, HARDCORE);
+tap(guest, ...[0, 1, 2, 3].map(() => key(ARROW_RIGHT)), key(ZERO));
+hold(1000, () => screen(guest) === QUEST_SELECT, "quest 5.10 in a room");
+assert.equal(guest.g.game_play_run(), alone_before, "a run alone in a room");
+// The partner joins the room and a session opens: key 0 starts quest 5.10, hardcore, the ranked save for it, for
+// both machines.
+assert.equal(host.g.game_coop_in_room(1), 1);
+connect([1, 0]);
+tap(guest, key(ZERO));
+play(idle, () => started() && peers.every((p) => confirmed(p) >= 0), "quest 5.10 from the room");
+for (const peer of peers) {
+  const [mode, major, minor, unlock, unlock_full, hardcore, players] = [4, 8, 12, 16, 20, 36, 48].map((at) => peer.config.readUInt32LE(at));
+  assert.deepEqual({ mode, major, minor, unlock, unlock_full, hardcore, players },
+    { mode: 3, major: 5, minor: 10, unlock: 50, unlock_full: 49, hardcore: 1, players: 2 }, `machine ${peer.seat}'s run`);
+}
+// The transport closes mid-run, and both pages leave the room: the menus, and the Guest's save, are its own again.
+for (const peer of peers) assert.equal(peer.g.game_coop_disconnect(DISCONNECTED), 1);
+machines.flights = [];
+play(idle, () => peers.every((p) => screen(p) === MAIN_MENU), "the menus after the room's run");
+for (const peer of peers) assert.equal(peer.g.game_coop_in_room(-1), 1);
+settle(guest, MAIN_MENU);
+const fresh = saved(guest).status;
+assert.deepEqual([fresh.quest_unlock_index, fresh.quest_unlock_index_hardcore], [0, 0], "the room's unlocks in the save");
+
 // The tutorial alone. The Guest's machine starts it from its menus, and a session opens there: a Survival run the
 // Host's menus start waits for it until the Host gives up, the tutorial going on. The Guest's game closes there,
 // and starts again for two local players.
@@ -812,7 +860,9 @@ unansweredStart(idle, () =>
 restart("config.gameplay.player_count = 2");
 
 // A local two-player run alone, which plays as the original and records nothing: the Guest's machine starts the
-// first quest from its menus, its second player idle, and plays it alone; two seconds in, a session opens. The run
+// first quest from its menus, its second player idle, and its page takes a seat in a room as the screen fades to the
+// run: the run sets up on the player's own save, handing out the weapons and perks the engine hands out from it, not
+// the room's every quest. It plays it alone; two seconds in, a session opens. The run
 // plays on: the Host's Survival waits for it until the Host gives up on its start, its window losing the focus stops
 // it as alone, and completing it unlocks the next quest in the save, the session's every quest unlocked never in
 // its place. Its game closes on the results, and starts again for one player.
@@ -820,7 +870,13 @@ click(guest, MAIN_MENU, PLAY_GAME);
 click(guest, PLAY_GAME_MENU, FRESH_QUESTS);
 settle(guest, QUEST_SELECT);
 tap(guest, key(ONE));
+assert.equal(screen(guest), QUEST_SELECT, "the fade to the local run");
+assert.equal(guest.g.game_coop_in_room(1), 1);
 settle(guest, GAMEPLAY);
+// The weapons unlocked and the perks available, as a run's snapshot holds them.
+const handed = (g) => (state(g), names.filter((n) => /^(weapons\[\d+\]\.unlocked|perk_metadata\[\d+\]\.available)$/.test(n)).map((n) => field(g, n)));
+init(headless, config(3, 1, 1, { unlock: 0, unlockFull: 0, players: 2 }));
+assert.deepEqual(handed(guest.g), handed(headless), "the local run's weapons and perks");
 const recorded = () => guest.g.game_replay_size();
 assert.equal(recorded(), 0, "a local run recorded");
 const local = guest.g.game_play_run();
