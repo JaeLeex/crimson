@@ -10,7 +10,7 @@ import pytest
 from crimson.creatures.spawn import CreatureTypeId
 from crimson.render.rtx import creature_lighting
 from crimson.render.rtx.creature_lighting import CreatureLighting
-from crimson.render.rtx.material_lights import MaterialLight
+from crimson.render.rtx.material_lights import MAX_MATERIAL_LIGHTS, MaterialLight
 from crimson.render.rtx.mode import RtxRenderMode
 from crimson.render.world import draw as world_draw
 from crimson.world.render_resources import RenderResources
@@ -308,7 +308,21 @@ def test_multiple_emitters_and_light_budget(lit_sprite):
         return sum(p[channel]-b[channel] for p, b in zip(pixels, base, strict=True))
     assert energy(both, 0) > energy(blue_only, 0) + 1
     assert energy(both, 2) > energy(red_only, 2) + 1
-    assert render([red]*16 + [blue]) == render([red]*16)
+    assert render([red]*MAX_MATERIAL_LIGHTS + [blue]) == render([red]*MAX_MATERIAL_LIGHTS)
+
+
+def test_independent_diffuse_and_specular_response(lit_sprite):
+    import msgspec
+
+    render, _ = lit_sprite
+    base = render([])
+    light = MaterialLight(Vec2(88, 64), 1, (1, .5, .1), illumination_gain=0, reflection_radius=110)
+    reflected = render([light])
+    assert reflected != base
+    assert [p[3] for p in reflected] == [p[3] for p in base]
+    assert render([msgspec.structs.replace(light, reflection_gain=0)]) == base
+    diffuse = render([msgspec.structs.replace(light, radius=110, illumination_gain=1, reflection_gain=0)])
+    assert diffuse != base and diffuse != reflected
 
 
 @pytest.mark.parametrize("rgb,channel", [((1.4, 0, 0), 0), ((0, 0, 1.4), 2)])
@@ -359,3 +373,28 @@ def test_transmission_retains_pigment_and_restrains_black_parts(lit_sprite, monk
     assert 0 < gain[0][0] < gain[1][0] * .1
     assert gain[2][0] > gain[2][1] * 3
     assert gain[3][1] > gain[3][0] * 3
+
+
+@pytest.mark.parametrize("illumination,radius,length", [(0., 110., 0.), (0., 110., 128.), (1., 1., 0.)],
+                         ids=["reflection-only-point", "reflection-only-tracer", "outside-illumination-reach"])
+def test_transmission_obeys_illumination_channel(lit_sprite, monkeypatch, illumination, radius, length):
+    render, lighting = lit_sprite
+    source = MaterialLight(Vec2(88, 64), radius, (1.4, .3, .1), height=40,
+                           direction=Vec2(1, 0), length=length,
+                           illumination_gain=illumination, reflection_radius=110)
+    base = render([], use_shader=False)
+    transmission_on = render([source])
+    illuminated = msgspec.structs.replace(source, radius=110, illumination_gain=1)
+    positive_control = render([illuminated])
+    lighting.close()
+    fragment = creature_lighting.CREATURE_FRAGMENT
+    reference = fragment.replace("const float TRANSMISSION_STRENGTH = 1.4;",
+                                 "const float TRANSMISSION_STRENGTH = 0.0;")
+    assert reference != fragment
+    monkeypatch.setattr(creature_lighting, "CREATURE_FRAGMENT", reference)
+    transmission_off = render([source])
+    # Actual GPU pixels: zero transmission, but the reflected catch remains.
+    assert transmission_on == transmission_off
+    assert transmission_on != base
+    assert [p[3] for p in transmission_on] == [p[3] for p in base]
+    assert positive_control != render([illuminated])
