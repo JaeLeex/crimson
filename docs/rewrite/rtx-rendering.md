@@ -549,3 +549,68 @@ HDR shoulder/game gamma. Unlike the isolated maps, this can be compared directly
 with `shaded`.
 `albedo` shows the substrate before blood absorption. `materials` shows blood in
 red, corpse coverage in green, brass in blue, and ice in cyan.
+
+
+## Explosion emission and pressure fronts
+
+Nuke and Final Revenge use generic explosion effects rather than secondary
+`DETONATION` projectiles. Each `spawn_explosion_burst` now records one render-only
+explosion event, independent of the one/three/four atlas pieces selected by the
+detail preset. It uses no additional RNG and does not change the native effect
+entries, simulation damage, or Classic drawing. Rocket-impact bursts opt out of
+the additional central light because their secondary detonation already owns it.
+
+The source illuminates terrain and creatures and reflects from wet materials.
+RTX archives the actual fireball sprites chosen by the native spawner, without
+extra RNG or additional pieces. It samples their position, scale, rotation and
+alpha at half age, extending their visible 0.7-second lifetime to 1.4 seconds.
+Native effect slots still expire normally; flash and smoke timing stay unchanged. Classic draws the original slots at normal speed.
+Rocket bursts retain their native fireball timing as well as their existing light.
+
+The emitter rises from 12 to 80 world units (times blast scale) with a smoothstep
+over 0.8 seconds. This height is art-directed: the sprites have no native Z data.
+Source width follows 35% of the growing, drifting fireball sprite bounds, clamped
+to 12–90 units times blast scale. A low early source gives long shadows; rising
+height shortens them and the growing source softens them. Radius stays at 330
+times blast scale. The linear-radiance envelope is `0.2 * exp(-t / 0.08) +
+0.8 * min(1, max(0, 1 - t / 1.4) / 0.75)^1.1`: a brief flash, a sustained bright
+phase through 0.35 seconds, then a fade with visible fireball alpha. RGB is
+`(1.8, 0.92, 0.3)` times this envelope; illumination/reflection gains are 6/1.2.
+These values describe visual tuning, not calibrated nuclear radiometry. Missing
+fireball sprites do not create a lingering invisible lamp.
+
+In RTX, the explosion-owned atlas ring becomes a warm, translucent shell plus a
+thin pressure distortion. Freeze, shield and other rings keep their native drawing.
+The shared render-only profile starts after 0.05 seconds and lasts 0.65 seconds:
+`radius = (30 + 650 * elapsed) * blast_scale`, with full strength through elapsed
+0.28 seconds, then a smoothstep fade. Shell alpha is `0.36 * strength *
+min(1, (100 / unscaled_radius)^0.65)` using the original RING texture tinted
+`(190, 163, 122)`. A narrow compression/rarefaction band displaces the world by up
+to 4.5 pixels times strength, with a transparent interior. A separate RGBA16F
+target avoids texture feedback, before display tone mapping and before HUD/UI.
+
+A distinct annular source follows this shell: height 16, source width 8,
+illumination support 85 and reflection support 100 (all times blast scale),
+illumination/reflection gains 1.8/0.65, and RGB `(0.60, 0.39, 0.18)` multiplied by
+`strength * sqrt(min(1, 100 / unscaled_radius))`. It lights terrain, creatures and
+bonus shells/icons, and reflects from wet materials. The pressure wave itself is
+not physically emissive: this warm source is an artistic representation of the
+visible blast shell. Rocket bursts use it too, without duplicating their central
+secondary-detonation source.
+
+`MaterialLight.ring_radius` explicitly describes the annulus; segment length is
+independent. Shaders choose the nearest ring point for illumination and the nearest
+ring point to the reflected eye ray for ground/bonus reflections. This is a
+continuous-shape approximation, not integration over the full circumference.
+Source ranking measures distance to the circumference; occlusion bounds cover the
+entire ring plus its support, including blockers inside the circle.
+
+The extra target and shader allocate lazily; frames with no active front use the
+original tonemap path. One fullscreen pass handles up to 16 simultaneous fronts.
+Explosion metadata is bounded to 128 events, expires after 1.4 seconds (0.7 for
+rocket bursts) and clears
+with the effect pool. Freeing a native slot also releases its visual owner, including overflow slots,
+so slot reuse cannot hide a later sprite. The shell remembers successful native
+allocation, then follows its own bounded event age; a reused slot cannot change
+its geometry or restart it. Archived fireball parameters stay separate from the
+reusable native slot.

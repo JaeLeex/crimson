@@ -21,6 +21,8 @@ from ..laser_sight import laser_sight_geometry
 if TYPE_CHECKING:
     from ..frame import RenderFrame
 
+from .explosion_shell import explosion_shell
+
 MAX_ILLUMINATION_SOURCES = 16
 MAX_REFLECTION_SOURCES = 16
 # The independently selected sets share one upload; overlapping sources occur only once.
@@ -28,7 +30,7 @@ MAX_MATERIAL_LIGHTS = MAX_ILLUMINATION_SOURCES + MAX_REFLECTION_SOURCES
 
 
 class MaterialLight(msgspec.Struct, frozen=True):
-    """A luminous disc or tapered segment, not necessarily a lamp.
+    """A luminous disc, tapered segment, or annulus, not necessarily a lamp.
 
     RGB is linear source radiance. Radius bounds illumination, source_width is
     the reflection footprint in world units, and gains control the two responses.
@@ -46,6 +48,8 @@ class MaterialLight(msgspec.Struct, frozen=True):
     reflection_gain: float = 1.0
     reflection_radius: float | None = None
     broad_illumination: bool = False
+    # Positive radius selects an annulus; its width remains source_width.
+    ring_radius: float = 0.0
     reflection_tail: float = 0.18
 
     @property
@@ -167,6 +171,8 @@ def _flame_sources(frame: RenderFrame) -> list[MaterialLight]:
 
 
 def _distance_sq(source: MaterialLight, point: Vec2) -> float:
+    if source.ring_radius > 0.0:
+        return ((point - source.pos).length() - source.ring_radius) ** 2
     axis = source.direction.normalized() if source.direction.length_sq() > .0001 else Vec2()
     delta = point - source.pos
     along = max(-source.length * 0.5, min(source.length * 0.5, delta.x * axis.x + delta.y * axis.y))
@@ -290,5 +296,38 @@ def collect_material_lights(frame: RenderFrame, *, view_center: Vec2) -> list[Ma
                     reflection_radius=140.0,
                 ),
             )
+    for visual in frame.state.effects.explosion_visuals:
+        shell = explosion_shell(visual.age, visual.scale) if visual.ring_spawned else None
+        if shell is not None:
+            scale = max(0.1, visual.scale)
+            sources.append(MaterialLight(
+                visual.pos, 85.0 * scale,
+                (0.60 * shell.energy, 0.39 * shell.energy, 0.18 * shell.energy),
+                height=16.0 * scale, ring_radius=shell.radius, source_width=8.0 * scale,
+                illumination_gain=1.8, reflection_gain=0.65, reflection_radius=100.0 * scale,
+                broad_illumination=True,
+            ))
+        if not visual.emit_light or not visual.fireballs or visual.age < 0.0 or visual.age >= visual.lifetime:
+            continue
+        # Keep the flash fast, sustain the visible fireball, then fade with its
+        # retimed alpha. Height is art-directed: native sprites have no Z data.
+        t = visual.age
+        fade = min(1.0, max(0.0, 1.0 - t / visual.lifetime) / 0.75)
+        gain = 0.2 * math.exp(-t / 0.08) + 0.8 * fade ** 1.1
+        rise = min(t / 0.8, 1.0)
+        rise = rise * rise * (3.0 - 2.0 * rise)
+        scale = max(0.1, visual.scale)
+        sources.append(
+            MaterialLight(
+                visual.pos,
+                330.0 * scale,
+                (1.8 * gain, 0.92 * gain, 0.3 * gain),
+                height=(12.0 + 68.0 * rise) * scale,
+                source_width=visual.fireball_radius,
+                illumination_gain=6.0,
+                reflection_gain=1.2,
+                broad_illumination=True,
+            ),
+        )
     sources.extend(_flame_sources(frame))
     return select_material_lights(sources, view_center=view_center)

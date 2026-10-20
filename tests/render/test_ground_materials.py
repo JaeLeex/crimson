@@ -820,6 +820,21 @@ def test_negligible_ground_diffuse_skip_has_bounded_linear_error(ground_material
     assert max(errors) <= 1.01e-5
 
 
+def test_ring_reflection_tracks_annular_footprint_instead_of_center(ground_material, mocker):
+    ground, texture = ground_material
+    uniform_deep_film(ground, texture)
+    collector = mocker.patch.object(ground_materials, "collect_material_lights")
+    ring = MaterialLight(Vec2(32, 16), 80, (1, .5, .2), height=18, ring_radius=18,
+                         source_width=2, illumination_gain=0)
+    collector.return_value = [ring]
+    reflected = debug_pixels(ground, texture, mode=5)
+    collector.return_value = [msgspec.structs.replace(ring, ring_radius=0)]
+    point = debug_pixels(ground, texture, mode=5)
+    assert max(p[0] for p in reflected) > .05
+    assert sum(abs(a[0] - b[0]) for a, b in zip(reflected, point, strict=True)) > 1
+    assert all(math.isfinite(c) for p in reflected for c in p)
+
+
 def test_direct_debug_maps_show_clean_ground_lighting_and_weighted_visibility(ground_material, mocker):
     ground, texture = ground_material
     pool = CreaturePool()
@@ -870,3 +885,20 @@ def test_no_direct_is_a_matched_beauty_comparison(ground_material, mocker):
     collector.return_value = [msgspec.structs.replace(collector.return_value[0], illumination_gain=0)]
     # Exactly the ordinary beauty pass with direct gain off; reflections remain present.
     assert debug_pixels(ground, texture, mode=0) == without_direct
+
+
+@pytest.mark.parametrize("ring_radius", [0., 18.])
+def test_reflection_tail_uniform_only_tapers_segments_not_annuli(ground_material, mocker, ring_radius):
+    ground, texture = ground_material
+    uniform_deep_film(ground, texture)
+    collector = mocker.patch.object(ground_materials, "collect_material_lights")
+    source = MaterialLight(Vec2(32, 16), 80, (1, .5, .2), height=18, ring_radius=ring_radius,
+                           direction=Vec2(1, 0), length=28, source_width=2, illumination_gain=0)
+    collector.return_value = [msgspec.structs.replace(source, reflection_tail=0)]
+    tapered = debug_pixels(ground, texture, mode=5)
+    collector.return_value = [msgspec.structs.replace(source, reflection_tail=1)]
+    uniform = debug_pixels(ground, texture, mode=5)
+    if ring_radius:
+        assert tapered == uniform
+    else:
+        assert sum(b[0] - a[0] for a, b in zip(tapered, uniform, strict=True)) > 1

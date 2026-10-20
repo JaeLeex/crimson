@@ -26,10 +26,12 @@ def test_diagnostics_bypass_hdr_but_classic_ignores_selection(assets_dir, mocker
     mocker.patch.object(runtime, "_render_ctx", return_value=context)
     draw = mocker.patch.object(runtime_module, "draw_world")
     label = mocker.patch.object(runtime_module, "draw_debug_label")
+    fronts = mocker.patch.object(runtime_module, "collect_pressure_fronts", return_value=[])
     scopes = []
 
     @contextmanager
-    def scope(*, out_size):
+    def scope(*, out_size, pressure_fronts):
+        assert pressure_fronts == []
         scopes.append(out_size)
         yield
 
@@ -43,6 +45,7 @@ def test_diagnostics_bypass_hdr_but_classic_ignores_selection(assets_dir, mocker
     runtime.draw()
     assert runtime.rtx_debug_active
     assert not scopes
+    fronts.assert_not_called()
     label.assert_called_once_with(RtxDebugView.SUBSTRATE_NORMAL)
     runtime.rtx_debug = RtxDebugView.SHADED
     runtime.draw()
@@ -52,3 +55,4 @@ def test_diagnostics_bypass_hdr_but_classic_ignores_selection(assets_dir, mocker
     assert scopes == [None, None]
     assert not runtime.rtx_debug_map_active
     assert draw.call_count == 4
+    assert fronts.call_count == 2

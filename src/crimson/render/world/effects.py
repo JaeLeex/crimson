@@ -9,6 +9,8 @@ from grim.raylib_api import rl, rl_color, rl_rectangle, rl_vector2
 
 from ...effects import EffectEntry, ParticleStyleId
 from ...effects_atlas import EffectId
+from ..rtx.explosion_shell import explosion_shell
+from ..rtx.mode import RtxRenderMode
 from . import viewport
 from .atlas import effect_cell_src, effect_cell_src_inset
 from .constants import _RAD_TO_DEG
@@ -139,12 +141,42 @@ def draw_effect_pool(
 
     pool = frame.state.effects
     effects = (*pool.entries, *pool.overflow_entries) if pool.overflow_entries else pool.entries
+    fireball_slots: set[int] = set()
+    if frame.rtx_mode is RtxRenderMode.RTX:
+        archived = []
+        for visual in pool.explosion_visuals:
+            shell = explosion_shell(visual.age, visual.scale) if visual.ring_spawned else None
+            if shell is not None:
+                archived.append(EffectEntry(
+                    effect_id=EffectId.RING, pos=visual.pos, age=0.0, flags=0x19,
+                    half_width=shell.radius, half_height=shell.radius, scale=1.0,
+                    color=RGBA(190 / 255, 163 / 255, 122 / 255, shell.alpha),
+                ))
+            if not visual.emit_light or not 0.0 <= visual.age < visual.lifetime:
+                continue
+            for sprite in visual.fireballs:
+                if sprite.native is not None:
+                    fireball_slots.add(id(sprite.native))
+                archived.append(sprite.sample(visual.fireball_age))
+        effects = (*effects, *archived)
     if not any(entry.flags and entry.age >= 0.0 for entry in effects):
         return
 
     scale = viewport.view_scale_avg(view_scale)
 
+    # Only the explosion spawner's own ring becomes the warm pressure shell. Freeze,
+    # shield and other atlas-ring effects retain their native presentation.
+    pressure_rings = (
+        {id(ring) for v in pool.explosion_visuals if (ring := v.active_ring) is not None}
+        if frame.rtx_mode is RtxRenderMode.RTX
+        else set()
+    )
+
     def draw_entry(entry: EffectEntry) -> None:
+        if id(entry) in fireball_slots:
+            return
+        if id(entry) in pressure_rings and int(entry.effect_id) == int(EffectId.RING):
+            return
         effect_id = int(entry.effect_id)
         src = effect_cell_src_inset(texture, effect_id)
         if src is None:

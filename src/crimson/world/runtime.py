@@ -12,6 +12,7 @@ from ..camera import CameraUpdate, camera_update_for_players
 from ..render.frame import RenderFrame
 from ..render.rtx.debug import RtxDebugView, draw_debug_label
 from ..render.rtx.mode import RtxRenderMode
+from ..render.rtx.shockwaves import collect_pressure_fronts
 from ..render.world import viewport
 from ..render.world.context import WorldRenderCtx
 from ..render.world.draw import draw_world, ui_render_aim_indicators
@@ -85,6 +86,7 @@ class WorldRuntime:
     @audio_rng.setter
     def audio_rng(self, value: CrandLike) -> None:
         self.audio_bridge.audio_rng = value
+
     # ------------------------------------------------------------------
     # Shared lifecycle methods (extracted from 4 identical implementations)
     # ------------------------------------------------------------------
@@ -170,7 +172,10 @@ class WorldRuntime:
         self.render_resources.process_ground_pending()
         render_ctx = self._render_ctx()
         if self.rtx_mode is RtxRenderMode.RTX and not self.rtx_debug_map_active:
-            with self.render_resources.hdr.scope(out_size=render_ctx.view.out_size):
+            with self.render_resources.hdr.scope(
+                out_size=render_ctx.view.out_size,
+                pressure_fronts=collect_pressure_fronts(render_ctx) if entity_alpha > 1e-3 else (),
+            ):
                 draw_world(render_ctx, entity_alpha=entity_alpha)
         else:
             draw_world(render_ctx, entity_alpha=entity_alpha)
