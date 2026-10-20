@@ -113,6 +113,47 @@ the original frame clock. `python3 crimson-core/checks/audio.py` checks these
 clocks, chunked output, device drift at 30 and 60 fps, missing, locked and
 unlocking devices, and stalls.
 
+### Native-resolution scene rendering
+
+The shared SDL/OpenGL/WebGL host rasterizes the scene at the physical pixel size
+of the fitted game rectangle. A 2560×1440 drawable with the default 1024×768
+logical view uses a 1920×1440 scene target. Projection, the D3D8 half-pixel
+correction, game configuration and pointer coordinates stay in logical units;
+the host does not expand the visible world or change ranked eligibility.
+Input and presentation share one integer, top-origin letterbox rectangle,
+including odd sizes and fractional display densities.
+
+The scene target is resized before each frame, preserving its previous image
+for frames that draw only overlays. Held frames and practice anchors keep their
+capture density and scale into the current scene target on restoration without
+reallocating it or changing its opaque alpha. Captures read the physical scene
+dimensions. The final presentation pass still applies the device gamma ramp.
+
+Ground targets render at a fixed 2× the configured texture density, independent
+of window DPI: the default 1024×1024 logical terrain uses 2048×2048 physical
+pixels for terrain, blood and corpses. Source artwork keeps its own dimensions,
+and ground projection/stamping coordinates stay logical. Replay snapshots copy
+the physical ground; at most eight copies keep the usual 128 MiB terrain-history
+budget (formerly 32 copies at 1024×1024). Compaction releases old copies before
+allocating the next one. Fewer snapshots can require more decal rebaking per
+seek; the existing adaptive spacing still preserves the first snapshot and
+reconstructs every intervening bake.
+
+Bitmap-font filtering is unchanged; native scene density does not remove
+nearest-filtered stroke variation at fractional scales. At a 3840×2160 drawable the 2880×2160 scene
+has 7.91 times the default logical pixel count (23.7 MiB for one RGBA8 target);
+fragment and blending cost increases with density and overdraw.
+
+`uv run crimson-core/checks/renderer.py` exercises real GPU pixels at 1×,
+fractional, Retina and 4K sizes, logical input mapping, smaller/odd viewports,
+2× terrain baking and copies, held/anchor restoration and alpha. Linux CI runs it under Xvfb.
+`uv run crimson-core/checks/renderer.py --web` builds the same assertions for
+WebGL2 in `build/renderer-check/index.html`. The native practice check compares
+restored world/HUD pixels at the display's actual density.
+`node crimson-core/checks/game_seek.mjs <game directory>` checks shuffled
+forward/backward seeks against straight simulation and terrain bake history,
+including the peak terrain-copy count through compaction.
+
 ### The tick seam
 
 [`host/game.inc`](host/game.inc) wraps the recovered Grim. During
