@@ -251,9 +251,9 @@ Basis derivatives are evaluated before alpha discard, with an identity fallback
 for singular UV mappings. Texture relief uses central differences at offsets of one atlas
 texel, rotated into world space, so its strength does not depend on framebuffer
 resolution. Both relief and alpha taps stay inside the current animation cell.
-Lights are uploaded once before the species passes. Beam intensity tapers from
-20% at the tail to 100% at the head; this gain applies once, independently of
-squared radial attenuation. Point lights and the native alpha cutoff remain intact.
+Lights are uploaded once before the species passes. Specular beam intensity tapers
+from 20% at the tail to 100% at the head. Illumination uses the shared head-weighted
+source position described below, independently of squared radial attenuation. Point lights and the native alpha cutoff remain intact.
 
 Thin parts also scatter lateral light, tinted by their pigment.
 `src/crimson/render/rtx/creature_translucency.py` estimates part size from each
@@ -271,11 +271,12 @@ The lateral response uses the light's elevation, independent of the cell-center
 dome normal, so a narrow limb can scatter on either side of the sprite.
 The shader samples this map once per body pixel and adds its directional response
 inside the existing light loop, sharing each emitter's finite source, radial
-attenuation and beam taper. It preserves sprite alpha and the existing HDR limit.
+attenuation and visibility. It preserves sprite alpha and the existing HDR limit.
 This is a silhouette part-size appearance model, not anatomical thickness or traced
 subsurface scattering. Square openings are orientation-dependent and can still
 classify curved tips and corners as thin. The model does not distinguish skin from
-claws/armor, cast shadows, or account for intervening creatures.
+claws/armor. Rounded body visibility now accounts for intervening creatures,
+but the transmission calculation itself remains an artistic approximation.
 
 Thickness textures are generated from the loaded source atlas on its first lit RTX
 body pass, cached by that atlas's texture ID, and released when the world's lighting
@@ -284,10 +285,10 @@ Each 512×512 atlas adds a 256 KiB single-channel texture without mipmaps; gener
 has a one-time readback and CPU preprocessing cost. Atlas binding happens once per
 species body batch, with no per-creature texture uploads or additional render pass.
 
-Only creature body passes use this shader. Existing shadows, hit flashes, freeze
-and poison overlays, players, and baked corpses keep their existing paths. No
-additional ambient darkening or cast shadows are introduced. Classic bypasses
-lighting entirely; an empty light list also uses the original body shader. GPU
+Only creature body passes use this shader. Contact shadows, hit flashes, freeze
+and poison overlays, players, and baked corpses keep their existing paths.
+RTX creature bodies retain a 0.60 linear ambient fill, with dynamic visibility
+applied per emitter. Classic bypasses lighting entirely. GPU
 resources are lazy and released with the world's render resources. The existing
 HDR world target and display shoulder handle the added highlights.
 
@@ -376,8 +377,8 @@ cases; the daylight baseline and classic renderer are unchanged.
 
 Dynamic ground reflections now test the path from the receiving surface to the
 same finite source point and height used by the reflection calculation. Each
-source's specular contribution gets its own visibility. Ambient daylight, sky
-reflection, diffuse weapon light, creature lighting, projectile artwork and the
+source's specular contribution gets its own visibility. Ambient daylight and sky
+reflection remain independent of that visibility. Projectile artwork and the
 classic renderer are unchanged. Reflection-only tracers are occluded even when
 their illumination gain is zero.
 
@@ -390,7 +391,7 @@ balancing a full ellipsoid on a single point. These are stable body approximatio
 not frame-by-frame silhouettes or anatomical geometry.
 
 A CPU-built spatial grid retains every body near the selected
-reflection sources. Cells are 64 world units in small scenes and 32 with at least
+reflection or illumination sources. Cells are 64 world units in small scenes and 32 with at least
 512 body volumes (256 standard creatures); the finer grid reduces candidate
 fetches in crowds. The resolution changes indexing only, not visibility.
 Source-support cells are marked once, avoiding a body-by-source
@@ -410,5 +411,99 @@ approximation, not multi-sample area-light integration; two partially opaque
 volumes combine by strongest occlusion, avoiding seams where a creature's body
 parts overlap. It does not add ambient darkness, lengthen shadows artificially,
 or lower the emitter for the occlusion test. Large source widths and heavily
-animated silhouettes remain approximations. Future diffuse shadows should share
-the body representation but need their own receiver/source visibility calculation.
+animated silhouettes remain approximations. Direct lighting shares these volumes
+and the grid while evaluating its own receiver/source segment.
+
+
+## Weapon illumination and soft body shadows
+
+RTX keeps readable daylight fill (ground `0.50 + 0.12 * daylight_ndl`, living
+sprites `0.60`, in linear RGB) while Ion, Fire Bullets and plasma add stronger
+localized illumination. This is an art-directed lighting balance, not exposure
+adaptation or a night mode. Blood absorption, aging, roughness and substrate/fluid
+normals are unchanged. Overlapping emitters add independently; Fire Bullet gain
+is restrained to 4 after inspecting a fifteen-shot replay frame.
+
+`lighting_shaders.py` shares source placement and visibility between ground and
+creatures. A finite beam's illumination is approximated by one energy centroid
+of the head-weighted distribution `0.015 + f^8`, at `f = 0.8524229` from tail to
+head. The source width supplies analytic soft edges. Fixed source positions avoid
+receiver-dependent shadow sliding, but this is not integration over the whole
+beam: it cannot reproduce every penumbra from the sixteen-sample lookdev study.
+One, two and four samples were measured before choosing this approximation.
+Ion and Fire Bullets use a coherent 24-unit source height for illumination and
+reflections, so their reflections move closer to the visible streak than before.
+Ordinary tracers remain reflection-only, and Gauss stays restrained.
+
+The ground pass builds and uploads the spatial index once; the following creature
+pass reuses it. Ground rays start at the surface; the artistic sprite lighting
+receiver is 8 units high. Each sprite recovers its center from the unnormalized
+UV/world derivative basis and excludes proxies carrying that owner center.
+A 0.02-world-unit tolerance prevents precision speckles at fractional zoom without
+requiring per-quad uniforms or breaking batches. Exactly coincident creatures
+share exclusion; this is a documented limitation of the batch-preserving owner
+representation. Tests retain blocking from a distinct owner only 0.1 units away.
+
+The existing shadows setting disables the new direct-light and creature visibility
+along with native contact shadows. Ground reflection visibility stays active,
+preserving its independent policy. A blocked emitter does not subtract ambient or
+other emitters' light. Bonuses still receive their existing analytical lighting
+without these cast shadows; players and overlays remain on their original paths.
+No flashlight, diffuse corpse occluders, individual legs, smoke or new normal maps
+are introduced.
+
+
+The energetic-source policy is explicit (`broad_illumination`), packed in the
+otherwise unused ground source-direction Z lane. Only Ion, Fire Bullets, normal
+plasma, energetic muzzle flashes, flame groups, rocket exhaust and detonations
+use the broader grazing response. Other sources retain `0.22 * NdotL` and their
+original relief bounds; changing this ground response does not rescale creature
+or bonus gains.
+
+Warm native OpenGL completion measurements on Apple M1 Pro (`OpenGL 4.1 Metal -
+90.5`), at fixed replay
+states (world drawing, including CPU submission, body-grid construction and
+`glFinish` completion; simulation, HUD and UI excluded):
+
+| Scene / target | Before | Initial candidate | Initial candidate, shadows off |
+| --- | ---: | ---: | ---: |
+| Ion Rifle, 67 living creatures, 1600×1000 | 5.61 ms | 7.80 ms | 4.86 ms |
+| Synthetic 384 creatures / 16 bright sources, 1600×1000 | 12.87 ms | 32.75 ms | 13.88 ms |
+
+Thirty measured frames followed eight warm frames per case. The shadows-off
+setting also disables the existing sprite contact-shadow pass. These are frame
+submission/completion timings, not isolated GPU timestamps or a whole-game FPS
+guarantee. The dense case is deliberately severe and its roughly 20 ms added cost
+is substantial. At 960×600, one/two/four illumination samples cost 18.25/26.24/42.13 ms
+in that synthetic case; the shipped single centroid avoids the extra integration
+cost. The corresponding earlier before measurement was 12.32 ms.
+
+
+Review follow-ups normalize or collapse degenerate source axes consistently,
+disable nonpositive reflection reaches before evaluating `smoothstep`, and avoid
+empty grid traversal/uniform-array uploads. Shadows-off grid construction considers
+only reflection support. Point-source creature reflections and diffuse lighting
+reuse the same visibility result. Diffuse contributions below `1e-5` linear RGB
+retain their radiance but skip shadow traversal, matching the existing reflection
+policy. R32F native tests compare against tracing every positive contribution and
+bound the additional light by `1.01e-5` per source (including float tolerance).
+
+A matched follow-up run with the same hardware, resolution and warmup measured:
+
+| 1600×1000 scene | Before review fixes (`67af1231e`) | After review fixes | After, shadows off |
+| --- | ---: | ---: | ---: |
+| Ion Rifle replay | 5.92 ms | 7.05 ms | 5.69 ms |
+| 384 creatures / 16 finite beam sources | 30.95 ms | 29.94 ms | 12.53 ms |
+| 384 creatures / 16 point sources | 31.45 ms | 27.31 ms | 13.13 ms |
+
+The point-source stress case improved by 13%, while this separate-process Ion
+run regressed by 19% (p10/p90: 4.41/6.75 ms before, 5.80/9.88 ms after). A bounded
+follow-up interleaved the old, reviewed, and reviewed-without-diffuse-gates shaders
+in ABC/CBA order twice, with the same current CPU renderer. Each of the four
+blocks per variant used 10 warm and 20 measured frames. Pooled Ion medians were
+6.01/5.80/6.19 ms respectively; p90 values were 9.52/9.56/9.65 ms. The slowdown did
+not persist under interleaving, but this does not establish a general typical-scene
+speedup. These small optimizations do not remove the substantial dense-scene cost.
+Before/after SDR captures differed by at most one 8-bit code value in at most 175
+of 4.8 million RGB channels; all body profiles and artistic lighting settings
+stayed fixed.
