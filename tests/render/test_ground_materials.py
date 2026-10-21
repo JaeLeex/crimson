@@ -929,3 +929,41 @@ def test_visible_death_shadow_collapses_without_an_instant_hp_cutoff(ground_mate
     assert 0 <= remaining < blocked * .2
     creature.death_timer = 0
     assert debug_pixels(ground, texture, mode=6, creatures=pool) == clear
+
+
+def test_default_beam_material_scope_upload_and_source_transitions_real_pixels(ground_material, mocker, monkeypatch) -> None:
+    ground, texture = ground_material
+    # A masked source before the beam catches an incorrect vec4 count/row offset.
+    reflection_only = MaterialLight(Vec2(32, 20), 150, (1, 1, 1), illumination_gain=0)
+    beam = MaterialLight(
+        Vec2(32, 20), 150, (.5, .8, 1.4), height=24, direction=Vec2(1, 0), length=48,
+        broad_illumination=True, beam_profile=(35.2, 6.82, 1.05), beam_ion=True,
+    )
+    collector = mocker.patch.object(ground_materials, "collect_material_lights", return_value=[reflection_only, beam])
+    upload = mocker.spy(rl, "set_shader_value_v")
+
+    def render():
+        return debug_pixels(ground, texture, mode=int(RtxDebugView.DIRECT_UNSHADOWED))
+
+    # Capture a non-beam frame before section uniforms have ever been uploaded.
+    nonbeam = msgspec.structs.replace(beam, beam_profile=None, beam_ion=False)
+    collector.return_value = [nonbeam]
+    baseline = render()
+    collector.return_value = [reflection_only, beam]
+    four = render()  # Accepted lighting is active without a separate control.
+    monkeypatch.setattr(ground_materials, "ION_DIRECT_GAIN", 1.)
+    one = render()
+    assert max(pixel[2] for pixel in one) > .001
+    # Exercise material_scope's real array binding and CFFI pointer conversion.
+    for normal, bright in zip(one, four, strict=True):
+        assert bright[:3] == pytest.approx(tuple(channel * 4 for channel in normal[:3]), rel=.002, abs=.001)
+    calls = [call for call in upload.call_args_list if call.args[1] == ground.beam_cells_location]
+    assert len(calls) == 2
+    assert all(call.args[4] == 6 and rl.ffi.typeof(call.args[2]).cname == "void *" for call in calls)
+    monkeypatch.setattr(ground_materials, "ION_DIRECT_GAIN", 4.)
+    collector.return_value = [nonbeam]
+    assert render() == baseline  # Stale cells must not affect a later non-beam frame.
+    collector.return_value = [reflection_only, beam]
+    assert render() == four
+    collector.return_value = []
+    assert all(pixel[:3] == (0., 0., 0.) for pixel in render())

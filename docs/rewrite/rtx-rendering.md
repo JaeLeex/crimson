@@ -627,3 +627,67 @@ the shadow shortens and fades as it settles, rather than blinking off at HP zero
 The later fading corpse sprite has no elevated proxy above its baked ground
 material. This uses existing simulation state only and does not alter death
 movement, damage, corpse timing, RNG or Classic rendering.
+
+
+## Extended beam illumination
+
+Python RTX uses a three-section approximation for Ion Rifle, Ion Minigun, Ion
+Cannon and Fire Bullets ground lighting by default. Ion direct illumination uses
+a 4x gain and a maximum 25% local ambient reduction; Fire retains its existing
+gain. These are presentation settings: simulation and classic rendering are
+unaffected. No separate beam console command or replay flag is required:
+
+```sh
+uv run crimson replay play 18-survival.crd --rtx
+```
+
+### Three energy-weighted sections
+
+The source follows the authored beam's stamp spacing, scale, brighter head and
+current length. A small radial lookup projects the narrow emitting core onto
+its longitudinal axis. Three cells sample this profile and retain their energy
+and centroid. Their weights sum to the existing light budget; the visible beam
+art is unchanged. Ion Rifle and Minigun source sizes share the same scale table
+as the projectile renderer.
+
+Each section casts through the existing rounded creature proxies and spatial
+grid. Projecting its longitudinal extent perpendicular to the body-space ray
+and measuring the line's overlap with the rounded body gives directional
+softness: broader across the beam, narrower when seen end-on. Transverse source
+width adds an edge feather. The projected chord stays continuous through the
+center of a body, where a miss-vector-based direction would be undefined.
+
+Section half-lengths are deliberately capped at four world units. The section
+centers still span the full beam. This is an artistic approximation of an
+extended source, not exact visibility integration of every beam stamp. The cap
+keeps the spatial candidate lists and penumbrae practical; no creature is dropped
+to enforce a caster budget. Overlapping proxies retain the existing minimum
+visibility semantics, and dying bodies retain their shared collapse/fade behavior.
+
+Preparation uploads one small uniform array and reuses the ordinary occlusion
+grid. Conservative grid-only source copies include the endpoint halo and bounded
+section softness. They never replace the original light uniforms used by
+reflections or creature lighting. A bounded 128-entry profile cache handles
+repeated shapes; a cache miss samples only nearby stamps. There is no per-beam
+candidate texture, interval sort, quadratic sweep or exact-overflow fallback.
+
+Ion's contrast reduces ambient only within its local footprint, fades
+with source radiance, and takes the maximum contribution of overlapping beams
+rather than multiplying dips. At the 0.25 setting, at least 75%
+of ordinary ambient remains. This changes ground direct illumination only:
+creature/bonus lighting and specular reflection approximations remain as before.
+Use F6 `direct`, `direct-unshadowed`, `visibility`, and `ambient` maps to inspect it.
+
+### Cost and visual limits
+
+Three sections were selected over one and five using native moving-beam renders.
+One remains visibly closer to a point source; five costs more without a useful
+improvement in the inspected scene. The ground shader includes this path; frames
+without eligible beam sources skip preparation and ignore stale section uniforms.
+
+Three visibility queries per beam are still more expensive than the previous
+centroid. Dense scenes with many simultaneous beams remain costly. The approximation can retain separate shadow
+lobes in difficult arrangements and does not reproduce the dense reference's
+penumbra exactly. It favors readable moving shadows and predictable source work
+over a numerical agreement target. Body traversal still scales with the actual
+spatial candidates.

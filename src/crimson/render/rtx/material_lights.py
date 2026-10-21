@@ -16,6 +16,7 @@ from ...projectiles.types import Projectile
 from ...projectiles.types import ProjectileTemplateId as PT
 from ...projectiles.types import SecondaryProjectileTypeId as ST
 from ...weapons import WEAPON_BY_ID, WeaponId
+from ..beam_profiles import STREAK_SCALES
 from ..laser_sight import laser_sight_geometry
 
 if TYPE_CHECKING:
@@ -51,6 +52,8 @@ class MaterialLight(msgspec.Struct, frozen=True):
     # Positive radius selects an annulus; its width remains source_width.
     ring_radius: float = 0.0
     reflection_tail: float = 0.18
+    beam_profile: tuple[float, float, float] | None = None
+    beam_ion: bool = False
 
     @property
     def reflection_reach(self) -> float:
@@ -121,6 +124,12 @@ def projectile_source(proj: Projectile) -> MaterialLight | None:
         width = min(18.0, max(1.0, distance * 0.035))
         if proj.life_timer < 0.4:
             rgb, width = (0.7, 0.36, 0.08), 5.0
+    beam_scale = STREAK_SCALES.get(proj.type_id)
+    beam_profile = None
+    if beam_scale is not None:
+        if direction.length_sq() == 0:
+            direction = Vec2.from_heading(proj.angle)
+        beam_profile = (16. * beam_scale, min(beam_scale * 3.1, 9.), 1.35 if proj.type_id == PT.FIRE_BULLETS else 1.05)
     return MaterialLight(
         proj.pos - direction * (span * 0.5),
         profile.radius,
@@ -133,6 +142,8 @@ def projectile_source(proj: Projectile) -> MaterialLight | None:
         broad_illumination=profile.broad_illumination,
         reflection_gain=profile.reflection,
         reflection_radius=profile.reach,
+        beam_profile=beam_profile,
+        beam_ion=beam_scale is not None and proj.type_id != PT.FIRE_BULLETS,
     )
 
 

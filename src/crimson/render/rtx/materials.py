@@ -23,6 +23,7 @@ from ...effects_atlas import EffectId
 from ...sim.terrain_fx import TerrainFxBatch
 from ..terrain_fx import FxQueueTextures, bake_terrain_fx_batch
 from ..world.atlas import effect_cell_src
+from .continuous_beam import ION_AMBIENT_DIP, ION_DIRECT_GAIN, prepare_beam_lights
 from .hdr import _HDR_TONEMAP_VS_330
 from .material_history import MaterialHistory
 from .material_lights import collect_material_lights
@@ -106,6 +107,7 @@ class MaterialGroundRenderer(GroundRenderer):
     wetness_epoch: float = 0.0
     stamp_locations: dict[str, int] = msgspec.field(default_factory=dict)
 
+    beam_cells_location: int = -1
     reflection_occlusion: ReflectionOcclusion = msgspec.field(default_factory=ReflectionOcclusion)
 
     def reset_materials(self) -> None:
@@ -126,6 +128,7 @@ class MaterialGroundRenderer(GroundRenderer):
             if shader is not None:
                 rl.unload_shader(shader)
         self.stamp_shader = self.material_shader = None
+        self.beam_cells_location = -1
         self.material_layers = None
         super().close()
 
@@ -143,6 +146,7 @@ class MaterialGroundRenderer(GroundRenderer):
             }
         if self.material_shader is None:
             self.material_shader = _shader(GROUND_FRAGMENT)
+            self.beam_cells_location = rl.get_shader_location(self.material_shader, "u_line_cells[0]")
         size = self.render_target.texture
         # Full precision preserves small weighted wetness contributions across epoch rebases.
         surface = load_float_render_texture(
@@ -386,7 +390,20 @@ class MaterialGroundRenderer(GroundRenderer):
             [body for creature in frame.creatures.entries for body in creature_body_volumes(creature)]
             if any(light.reflection_gain > 0 or (shadows and light.illumination_gain > 0) for light in lights) else []
         )
-        grid = build_occlusion_grid(bodies, lights, width=self.width, height=self.height, illumination=shadows)
+        has_beam_lights = any(
+            light.beam_profile is not None and light.illumination_gain > 0 for light in lights
+        )
+        _integer(sh, "u_has_beam_lights", int(has_beam_lights))
+        grid_lights = lights
+        if has_beam_lights:
+            cells, grid_lights = prepare_beam_lights(lights)
+            _uniform(sh, "u_beam_tuning", [ION_DIRECT_GAIN, ION_AMBIENT_DIP])
+            cells_buffer = rl.ffi.new("float[]", cells)
+            rl.set_shader_value_v(
+                sh, self.beam_cells_location, rl.ffi.cast("void *", cells_buffer),
+                rl.ShaderUniformDataType.SHADER_UNIFORM_VEC4, len(cells) // 4,
+            )
+        grid = build_occlusion_grid(bodies, grid_lights, width=self.width, height=self.height, illumination=shadows)
         occlusion_texture = self.reflection_occlusion.upload(grid) if grid.body_count else None
         _uniform(sh, "u_occlusion_grid", [
             grid.origin.x, grid.origin.y, float(grid.columns if grid.body_count else 0), float(grid.rows),
