@@ -17,6 +17,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      scores: ${{ steps.detect.outputs.score-store-windows }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: detect
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          base=()
+          if [[ -n "$BASE_SHA" && ! "$BASE_SHA" =~ ^0+$ ]]; then
+            git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --no-tags --depth=1 origin "$BASE_SHA"
+            base=(--base "$BASE_SHA")
+          fi
+          python3 scripts/ci_changed_paths.py changed "${base[@]}" score-store-windows >> "$GITHUB_OUTPUT"
+
+  score-store-windows:
+    needs: changes
+    if: needs.changes.outputs.scores == 'true'
+    name: score-store-windows
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --frozen --group dev
+      # Exercise actual Windows binary append, locking, rollback and concurrent writers.
+      - run: uv run --no-sync pytest -q tests/persistence/test_highscores.py
+
   checks:
     name: ${{ matrix.task }}
     runs-on: ubuntu-latest
