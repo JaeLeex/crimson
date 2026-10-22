@@ -26,6 +26,7 @@ from crimson.replay.codec import (
     dump_replay,
     encode_replay_payload,
     inflate_replay_payload,
+    load_replay_file,
 )
 from crimson.replay.driver.playback_driver import PlaybackDriver, ReplayRunnerError
 from crimson.replay.ranked import RankedTickMonitor, outcome_reasons, ranked_board, ranked_run_spec, unranked_reasons
@@ -58,6 +59,10 @@ def _sha(data: bytes) -> str:
 def _run_id(transport: bytes) -> str:
     """The service's id for a run (runIdentity in service/src/transport.ts): a one-player stream without its player
     count, a co-op one whole."""
+    rules = int.from_bytes(transport[264:268], "little")
+    transport = transport[:264] + transport[272:]
+    if rules != 1:
+        return _sha(b"crimson:run:rules\0" + rules.to_bytes(4, "little") + transport)
     if transport[48:52] != (1).to_bytes(4, "little"):
         return _sha(transport)
     return _sha(transport[:48] + transport[52:])
@@ -451,6 +456,17 @@ def custom_quest_payload() -> dict[str, object]:
         "run_id": _run_id(transport),
     }
 
+def unranked_run() -> str:
+    """A fresh, unfinished run under the historical Rush fixture's unranked configuration."""
+    historical = decode_replay_payload(inflate_replay_payload((FIXTURES / "rush-kills103.crd").read_bytes()))
+    replay = msgspec.structs.replace(
+        _base_replay(), run=historical.run, seat_keys=None,
+        ticks=[ReplayTick(inputs=[(0.0, 0.0, 512.0, 400.0, (1 << 8) | (1 << 12))])],
+    )
+    result = PlaybackDriver(replay, version_mismatch_action=None).run()
+    return base64.b64encode(dump_replay(msgspec.structs.replace(replay, result=result))).decode("ascii")
+
+
 def main() -> None:
     from quests import quest_dsl_tables
 
@@ -458,8 +474,11 @@ def main() -> None:
     ranked, inflated, piloted, illegal, ranked_id = ranked_run()
     vectors = {
         "fixtures": fixture_vectors(), "valid_payload": base, "corrupted": corrupted, "custom_quest_run": custom_quest_payload(), "ranked_run": ranked,
+        "legacy_ranked_run": base64.b64encode((FIXTURES / "rules1-ranked-survival.crd").read_bytes()).decode(),
+        "legacy_ranked_run_id": _run_id(_core_transport()(load_replay_file(FIXTURES / "rules1-ranked-survival.crd"), None)),
+        "legacy_coop_run_id": _run_id(_core_transport()(load_replay_file(FIXTURES / "rules1-ranked-coop.crd"), None)),
         "ranked_run_id": ranked_id, "ranked_run_inflated": inflated, "piloted_run": piloted, "illegal_command_run": illegal,
-        "unranked_run": base64.b64encode((FIXTURES / "rush-kills103.crd").read_bytes()).decode("ascii"),
+        "unranked_run": unranked_run(),
         "coop_run": coop_runs(),
         "terrain": terrain_vectors(),
         "run_terrain": run_terrain_vectors(),

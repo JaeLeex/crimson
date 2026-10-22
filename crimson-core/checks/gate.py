@@ -11,7 +11,8 @@ and RNG caller order at each recorded tick) in the same pass.
 
 Each stream's config carries its bug policy (`preserve_bugs`), and Python runs
 under the same one: the bot corpus covers both, and recorded fixtures replay
-under the rules they were recorded with, so their claimed results apply.
+only when their rules version matches this build, so their claimed results apply.
+Historical recordings remain codec fixtures and are reported as unsupported here.
 """
 
 import argparse
@@ -30,7 +31,7 @@ import msgspec
 from replay import QUEST_BYTES, custom_quest, encode
 
 from crimson.game_modes import GameMode
-from crimson.game_version import REPLAY_FORMAT_VERSION, REPLAY_RULES
+from crimson.game_version import REPLAY_FORMAT_VERSION
 from crimson.quests.level import QuestLevel
 from crimson.quests.results import compute_quest_final_time
 from crimson.replay.checkpoint_diff import compare_checkpoints
@@ -38,6 +39,7 @@ from crimson.replay.checkpoints import ReplayCheckpoint, load_checkpoints_file
 from crimson.replay.codec import load_replay_file
 from crimson.replay.driver.playback_driver import PlaybackDriver, ReplayRunnerError
 from crimson.replay.types import Replay, ReplayTick, current_recorder
+from crimson.replay.versioning import require_playable_rules
 from crimson.sim.commands import PerkMenuOpenCommand, PerkPickCommand
 from crimson.sim.run_result import (
     PlayerRunResult,
@@ -53,8 +55,8 @@ from crimson.weapons import WeaponId
 
 CORE = Path(__file__).resolve().parents[1]
 ROOT = CORE.parent
-# `PortableConfig` in host/api.h: 13 uint32 settings, the player count last, then the weapon usage counts.
-CONFIG_BYTES = 264
+# `PortableConfig` in host/api.h: 13 uint32 settings, the player count last, then the weapon usage counts and two profile words.
+CONFIG_BYTES = 272
 SETTINGS = 13
 
 # Native `game_state_pending` values that end a run (third_party/headers/crimsonland_types.h).
@@ -69,6 +71,8 @@ WEAPON_USAGE_SLOTS = 53
 
 # Per-tick comparison: (label, core snapshot field, Python getter, f32?). Floats compare as F32 bits.
 GLOBAL_FIELDS: tuple[tuple[str, str, Callable, bool], ...] = (
+    ("legacy_coop_reload", "globals.portable_legacy_coop_reload", lambda s: s.world.state.legacy_coop_reload, False),
+    ("rules", "globals.portable_rules", lambda s: s.world.state.rules, False),
     ("rng", "globals.rng", lambda s: s.world.state.rng.state, False),
     ("kills", "globals.creature_kill_count", lambda s: s.world.creatures.kill_count, False),
     ("pending_perks", "globals.perk_pending_count", lambda s: s.world.state.perk_selection.pending_count, False),
@@ -111,7 +115,14 @@ def fields(players: int) -> tuple[tuple[str, str, Callable, bool], ...]:
         for index in range(players)
         for label, name, getter, floating in PLAYER_FIELDS
     )
-    return GLOBAL_FIELDS + own
+    rules = tuple(
+        (f"player{index + 1}.{name}", f"player_rules[{index}].{name}",
+         player_getter(index, lambda p, name=name: getattr(p, name)), floating)
+        for index in range(players)
+        for name, floating in (("fire_cough_interval", True), ("hot_tempered_interval", True),
+                               ("alt_weapon_swap_cooldown_ms", False))
+    )
+    return GLOBAL_FIELDS + own + rules
 # Result-only fields read from the core's last compared snapshot.
 RESULT_FIELDS = (
     "globals.game_state_pending",
@@ -184,8 +195,8 @@ class Stream:
             return self.recorded
         return Replay(
             format_version=REPLAY_FORMAT_VERSION,
-            game_version="",
-            rules=REPLAY_RULES,
+            game_version="0.18.0" if self.config[67] else "0.19.2",
+            rules=self.config[66],
             recorder=current_recorder(),
             pilot=None,
             seat_keys=None,
@@ -225,6 +236,7 @@ def load_streams(rsi_dir: Path, fixtures_dir: Path) -> tuple[list[Stream], dict[
     for path in sorted(fixtures_dir.glob("*.crd")):
         try:
             replay = load_replay_file(path)
+            require_playable_rules(replay)
             payload = encode(replay, None)
             sidecar = path.with_name(path.name + ".chk")
             checkpoints = tuple(load_checkpoints_file(sidecar).checkpoints) if sidecar.exists() else ()
@@ -256,7 +268,7 @@ def run_core(native: Path, stream: Stream, columns: list[int]) -> tuple[list[tup
     return rows, proc.returncode, proc.stderr.decode()
 
 
-def core_result(row: dict[str, int], mode: GameMode, players: int) -> RunResult:
+def core_result(row: dict[str, int], mode: GameMode, players: int, preserve_bugs: bool = False, rules: int = 2) -> RunResult:
     """The core does not export a RunResult yet; derive it from its state with Python's definitions."""
 
     state = row["globals.game_state_pending"]
@@ -284,6 +296,7 @@ def core_result(row: dict[str, int], mode: GameMode, players: int) -> RunResult:
                 base_time_ms=elapsed,
                 player_health_values=health,
                 pending_perk_count=pending,
+                preserve_bugs=preserve_bugs, rules=rules,
             ).final_time_ms
             if outcome == RunOutcome.QUEST_COMPLETED
             else None
@@ -367,7 +380,7 @@ def compare(stream: Stream, native: Path) -> dict:
     compared_tick = python_ticks
     row = dict(zip(names, core_rows[compared_tick], strict=True))
     expected = build_run_result(session, outcome=session.end_outcome())
-    actual = core_result(row, spec.game_mode_id, stream.players)
+    actual = core_result(row, spec.game_mode_id, stream.players, spec.preserve_bugs, replay.rules)
     mismatches = run_result_mismatches(expected, actual)
     checkpoint_diff = compare_checkpoints(stream.checkpoints, checkpoints) if stream.checkpoints else None
     claimed = stream.recorded.result if stream.recorded is not None else None

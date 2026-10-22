@@ -81,10 +81,20 @@ differently: a replay plays back only under the rules it was recorded under. Rea
 `run.custom_quest`, as playing stock quests, and v30 to v33, which had no `seat_keys`, as naming no seat's key;
 writers always write v34.
 
-One change played earlier replays differently without raising `rules`:
-[original bug 40](../rewrite/original-bugs.md#40-the-reload-key-does-nothing-in-co-op), the reload key in co-op with
-`preserve_bugs` off. A co-op replay recorded before it that pressed Reload can drift; one-player and `preserve_bugs`
-replays play as before.
+Rules 2 includes exact-zero reload completion, Jinxed/chain living-target
+selection, independent randomized perk intervals and swap cooldowns, post-swap
+readiness, nonnegative quest life bonuses, single rocket death handling, DoT
+death boundaries, impact-aligned corpse slides with corrected impulses, and complete
+Gauss Shotgun/Multi-Plasma Fire Bullets volleys at normal multi-pellet cooldowns.
+Both rules 1 and 2 are playable and verifiable using explicit simulation profiles;
+new runs default to rules 2. `preserve_bugs` selects original behavior, not the
+previous fixed default. Existing payloads, signatures and results remain intact.
+
+The co-op reload fix (original bug 40) changed behavior during rules 1 without
+raising its version. Known releases and the pinned service-vector build select
+the corresponding behavior; ambiguous 0.18 development builds are refused for
+rules-1 default co-op pending provenance. See the
+[rules compatibility contract](../rewrite/replay-rules-compatibility.md#historical-reload-provenance).
 
 `Recorder` is a map of `client` (`crimson` for the Python port, `crimson-core` for the web and native clients),
 `version` (that client's own content identity, in `game_version`'s form) and `platform` (the Python port's
@@ -243,11 +253,10 @@ debugging, but a prefix never verifies a result.
 
 Verification establishes that the recorded inputs, replayed by the
 verifier's simulation, produce the recorded result. The verifier reports the
-replay's `game_version`; a service that ranks runs must verify each one with
-the build that version names. Any build plays back and verifies a replay of
-its own format version, warning when the recording build differs: a rules
-change between the two shows up as a result mismatch. Verification does not establish who produced the
-inputs or in what real time.
+replay's `game_version` as provenance. The service selects the recorded `rules`
+profile, including documented historical exceptions, and verifies the derived
+result. A different recording build warns without changing the selected rules.
+Verification does not establish who produced the inputs or in what real time.
 
 The live game simulates exactly the inputs it records: it rounds each tick's
 inputs to the stored form (f32 axes, packed flags) before stepping, so no

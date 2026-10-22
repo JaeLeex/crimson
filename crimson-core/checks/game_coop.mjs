@@ -9,7 +9,7 @@
 // 1. the engine with both players local plays the stream as the plain run does,
 //    every canonical word of every tick (but the picker, which only co-op has),
 //    and gives each tick's state hash, bake digest, terrain and music digests and
-//    raw state;
+//    raw state (excluding consumed decal-queue bytes, whose bakes are compared);
 // 2. again, with forced rollbacks, at each window (lockstep, 1, 4, 8 and 12
 //    ticks; a Survival stream's 8 narrowing to 4 halfway through, as past 15
 //    minutes), delay and frame budget (catch-up frames that run several ticks):
@@ -74,7 +74,7 @@ const live = args[0] === "--live" ? args.splice(0, 2)[1] : null;
 const [wasm = new URL("build/game/game.wasm", CORE).pathname, corpus = new URL("build/fixtures", CORE).pathname] = args;
 const streams = fs
   .readdirSync(corpus)
-  .filter((f) => /^coop-.*\.rsi$/.test(f))
+  .filter((f) => /^(?:coop-|rules1-coop).*\.rsi$/.test(f))
   .sort();
 assert.ok(streams.length, "no co-op streams: run checks/matrix.mjs");
 
@@ -101,7 +101,13 @@ const SURVIVAL = 1,
 // Inside the original (--live), with seven in-game tunes loaded (game_host.mjs sevenTunes): streams with an
 // in-game tune, the quest's end tune and its volume, a game over's, Nukes whose blood waits for the next tick's
 // bake, and overflow decals; a window of 4 whose corrections follow played music, and catch-up frames.
-const LIVE_STREAMS = ["coop-quest-1.1-ranked.rsi", "coop-survival-hunt-ranked.rsi", "coop-survival-effects-ranked.rsi"];
+const LIVE_STREAMS = [
+  "coop-quest-1.1-ranked.rsi",
+  "coop-survival-hunt-ranked.rsi",
+  "coop-survival-effects-ranked.rsi",
+  // Original-policy Nukes still cover committing a decal while the next tick's bake is queued.
+  "coop-survival-extra-choices.rsi",
+];
 const LIVE_MODES = [
   { delay: 2, rmax: 4, budget: 2 },
   { delay: 4, rmax: 1, budget: 6 },
@@ -192,9 +198,17 @@ function playPlain(run) {
 function variants(stream) {
   const { ticks, picks } = playPlain(stream);
   const at = picks.findIndex((p, i) => i < picks.length - 1 && p.n === 6 && p.ids.includes(PERK_MASTER));
-  if (at < 0) return [{ stream }];
-  const master = repick(stream, picks[at].tick, picks[at].ids.indexOf(PERK_MASTER));
-  return playPlain(master).ticks === ticks ? [{ stream }, { stream: master, name: "Perk Master" }] : [{ stream }];
+  const runs = [{ stream }];
+  if (at >= 0) {
+    const master = repick(stream, picks[at].tick, picks[at].ids.indexOf(PERK_MASTER));
+    if (playPlain(master).ticks === ticks) runs.push({ stream: master, name: "Perk Master" });
+  }
+  // A run that later earns Master takes its last extra pick from seven choices.
+  // Also stop at its last six-choice menu so requests explicitly takes slot six.
+  const sixth = picks.findLast((p) => p.n === 6 && p.ids[5] > 0);
+  if (sixth && picks.some((p) => p.tick > sixth.tick && p.n === 7))
+    runs.push({ stream: { ...stream, records: stream.records.slice(0, sixth.tick + 1) }, name: "Perk Expert sixth choice" });
+  return runs;
 }
 
 // The players' requests for each tick, from the stream's commands and the plain run's states (a request no perk
@@ -433,7 +447,7 @@ function rollbacks(g, { run, cmd, ticks, opens, overflow, queued }, { expected, 
 
 // Each field family the hash covers changes it, two sign flips included.
 function corruptions(g) {
-  for (let kind = 0; kind < 8; kind++) {
+  for (let kind = 0; kind < 11; kind++) {
     const before = g.game_coop_hash();
     assert.equal(g.game_coop_corrupt(kind), 1, `corruption ${kind} found nothing to change`);
     assert.notEqual(g.game_coop_hash(), before, `corruption ${kind} left the hash alone`);
@@ -1464,8 +1478,10 @@ receive(decode(fs.readFileSync(path.join(corpus, streams[0]))));
 prediction(cases.menus.stream.run);
 for (const line of pipeCases(cases.menus.stream, cases.menus.truth, cases.short.stream, cases.short.truth))
   console.log(JSON.stringify(line));
-for (const [name, count] of Object.entries(coverage)) assert.ok(count > 0, `no ${name} across the co-op streams`);
-for (const [name, count] of Object.entries(pipeCoverage)) assert.ok(count > 0, `no ${name} between the peers`);
+const missing = Object.entries(coverage).filter(([, count]) => count === 0).map(([name]) => name);
+const missingPipe = Object.entries(pipeCoverage).filter(([, count]) => count === 0).map(([name]) => name);
+assert.deepEqual(missing, [], `missing co-op coverage: ${missing.join(", ")}; ${JSON.stringify(coverage)}`);
+assert.deepEqual(missingPipe, [], `missing peer coverage: ${missingPipe.join(", ")}; ${JSON.stringify(pipeCoverage)}`);
 console.log(
   `Passed ${report.length} co-op streams; audit ${auditMs} ms; coverage ${JSON.stringify(coverage)}; ` +
     `between the peers ${JSON.stringify(pipeCoverage)}`,

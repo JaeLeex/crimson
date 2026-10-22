@@ -652,7 +652,10 @@ function Stats(props: { run: RunTimeline; detail: RunDetailView }) {
 // the millisecond), each pending perk 1 s.
 function QuestScore(props: { detail: RunDetailView }) {
   const result = props.detail.result;
-  const lifeBonus = lifeBonusMs(result.healths);
+  // Historical runs keep the calculation that produced their stored score. The
+  // database predates rules metadata; where both formulas agree, either is exact.
+  const legacy = props.detail.rules === 1;
+  const lifeBonus = lifeBonusMs(result.healths, legacy);
   const perkBonus = result.pending_perks * 1000;
   const adjustment = (bonus: number) => `${bonus > 0 ? "−" : bonus < 0 ? "+" : ""}${formatScore("quests", Math.abs(bonus))}`;
   return (
@@ -764,7 +767,7 @@ export function runPanels(detail: RunDetailView, reload: () => void): (() => JSX
         <p class="muted">
           {new Date(detail.accepted_at).toISOString().slice(0, 10)} · {detail.recorder.client} {detail.recorder.version} · {detail.recorder.platform}
         </p>
-        <p class="muted">Game version: {detail.game_version}</p>
+        <p class="muted">Rules {detail.rules} · Game version: {detail.game_version}</p>
         <Show when={detail.retired}>
           {(reason) => <p class="muted">Retired from the boards: {reason()}. The game no longer plays it as recorded.</p>}
         </Show>

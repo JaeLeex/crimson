@@ -87,9 +87,12 @@ static void replay_result(Msgpack &m, const char *outcome) {
   if (!strcmp(outcome, "quest_completed")) {
     // compute_quest_final_time (src/crimson/quests/results.py): player one's
     // health truncated, then times 50; the second player's times 50, truncated.
-    int final = elapsed - (int)player_state_table[0].health * 50 - perk_pending_count * 1000;
-    for (uint32_t p = 1; p < cfg.players; ++p)
-      final -= (int)(player_state_table[p].health * 50.0f);
+    int final = elapsed - perk_pending_count * 1000;
+    for (uint32_t p = 0; p < cfg.players; ++p) {
+      float health = player_state_table[p].health;
+      if (portable_rules2_fixes && health < 0.0f) health = 0.0f;
+      final -= p == 0 ? (int)health * 50 : (int)(health * 50.0f);
+    }
     m.integer(final == 0 ? 1 : final);
   } else
     m.nil();
@@ -167,7 +170,7 @@ static std::vector<uint8_t> replay_payload(const char *outcome, const ReplayHead
   m.map(9);
   m.str("format_version"), m.integer(CRIMSON_REPLAY_FORMAT);
   m.str("game_version"), m.str(CRIMSON_GAME_VERSION);
-  m.str("rules"), m.integer(CRIMSON_REPLAY_RULES);
+  m.str("rules"), m.integer(cfg.rules);
   m.str("recorder"), m.map(3);
   m.str("client"), m.str("crimson-core");
   m.str("version"), m.str(header.version.c_str());
@@ -765,8 +768,22 @@ static bool replay_read(const std::vector<uint8_t> &file, LoadedReplay &out) {
   // Formats 30 to this build's read alike: each adds a field (docs/formats/replay.md).
   if (out.reason.empty() && (!r.ok || !whole || format < 30 || format > CRIMSON_REPLAY_FORMAT || !replay_config_valid(config)))
     out.reason = "This version cannot read its replay";
-  else if (out.reason.empty() && out.rules != CRIMSON_REPLAY_RULES)
+  else if (out.reason.empty() && out.rules != 1 && out.rules != CRIMSON_REPLAY_RULES)
     out.reason = "Recorded under other rules (" + out.game_version.substr(0, out.game_version.find('+')) + ")";
+  config.rules = out.rules;
+  if (out.reason.empty() && out.rules == 1 && config.players > 1 && !config.preserve_bugs
+      && out.game_version != "0.18.0+build.64a9589f5fbefdc036f0559b") {
+    unsigned major = 0, minor = 0, patch = 0;
+    int end = 0;
+    if (sscanf(out.game_version.c_str(), "%u.%u.%u%n", &major, &minor, &patch, &end) == 3 && end > 0
+        && (major > 0 || minor >= 19)) {
+      config.legacy_coop_reload = 0;
+    } else if (end > 0 && major == 0 && (minor < 18 || (minor == 18 && patch == 0 && (size_t)end == out.game_version.size()))) {
+      config.legacy_coop_reload = 1;
+    } else {
+      out.reason = "Rules-1 co-op reload needs known recording-build provenance";
+    }
+  }
   memcpy(out.recording.data(), &config, sizeof config);
   return out.reason.empty();
 }
