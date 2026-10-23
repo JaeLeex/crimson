@@ -13,6 +13,18 @@ from .raylib_api import ffi, rl
 HDR_PIXEL_FORMAT = rl.PixelFormat.PIXELFORMAT_UNCOMPRESSED_R16G16B16A16
 _RL_ATTACHMENT_COLOR_CHANNEL0 = 0
 _RL_ATTACHMENT_TEXTURE2D = 100
+_GL_TEXTURE_2D = 0x0DE1
+_GL_RGBA = 0x1908
+_GL_FLOAT = 0x1406
+_GL_TEXTURE_RED_TYPE = 0x8C10
+# raylib's OpenGL 2.1 backend (the Linux arm64/i686 and Windows Win32 wheels) allocates float pixel formats with an
+# unsized GL_RGBA, which drivers store as unorm, so the targets clip at 1.0. Respecify them with sized formats.
+_GL_FLOAT_FORMATS = {
+    int(rl.PixelFormat.PIXELFORMAT_UNCOMPRESSED_R16G16B16A16): (0x881A, 0x140B),  # GL_RGBA16F, GL_HALF_FLOAT
+    int(rl.PixelFormat.PIXELFORMAT_UNCOMPRESSED_R32G32B32A32): (0x8814, _GL_FLOAT),  # GL_RGBA32F
+}
+# GL entry points use the platform's APIENTRY convention, stdcall on 32-bit Windows.
+_GL_FUNCTYPE = C.WINFUNCTYPE if sys.platform == "win32" else C.CFUNCTYPE
 _log = logging.getLogger(__name__)
 
 
@@ -39,12 +51,41 @@ _edr_active = False
 _headroom = 1.0
 
 
+def _gl(name: str, *argtypes: Any) -> Any:
+    return _GL_FUNCTYPE(None, *argtypes)(int(ffi.cast("uintptr_t", rl.glfw_get_proc_address(name))))
+
+
+def _store_as_float(texture_id: int, width: int, height: int, pixel_format: int) -> bool:
+    """Respecify the texture with a sized float format unless it is already float; whether it ends up float."""
+    bind = _gl("glBindTexture", C.c_uint, C.c_uint)
+    query = _gl("glGetTexLevelParameteriv", C.c_uint, C.c_int, C.c_uint, C.POINTER(C.c_int))
+
+    def is_float() -> bool:
+        red_type = C.c_int()
+        query(_GL_TEXTURE_2D, 0, _GL_TEXTURE_RED_TYPE, C.byref(red_type))
+        return red_type.value == _GL_FLOAT
+
+    bind(_GL_TEXTURE_2D, texture_id)
+    if not is_float():
+        internal_format, data_type = _GL_FLOAT_FORMATS[int(pixel_format)]
+        _gl("glTexImage2D", C.c_uint, C.c_int, C.c_int, C.c_int, C.c_int, C.c_int, C.c_uint, C.c_uint, C.c_void_p)(
+            _GL_TEXTURE_2D, 0, internal_format, width, height, 0, _GL_RGBA, data_type, None,
+        )
+    stored = is_float()
+    bind(_GL_TEXTURE_2D, 0)
+    return stored
+
+
 def load_float_render_texture(
     width: int, height: int, *, pixel_format: int = HDR_PIXEL_FORMAT,
 ) -> rl.RenderTexture:
     texture_id = int(rl.rl_load_texture(ffi.NULL, int(width), int(height), pixel_format, 1))
     if texture_id <= 0:
         raise RuntimeError("float render target texture allocation failed")
+    # Every GL 3.x driver, which the RTX shaders need, stores RGBA16F and RGBA32F as float.
+    if not _store_as_float(texture_id, int(width), int(height), pixel_format):
+        rl.rl_unload_texture(texture_id)
+        raise RuntimeError("float render target texture is not stored as floating point")
     framebuffer = int(rl.rl_load_framebuffer())
     if framebuffer <= 0:
         rl.rl_unload_texture(texture_id)
