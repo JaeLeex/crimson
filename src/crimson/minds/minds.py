@@ -91,43 +91,78 @@ class RandomMind:
 
 
 class FlankMind:
-    """Sends its creatures around the player's aim: half to each side of the firing line, the rest behind.
+    """Sends its creatures round the player's aim with the tactics vocabulary (`crimson.minds.tactics`).
 
-    Which side a creature takes is drawn from the mind's own seeded stream, so two runs with different
-    mind seeds differ while each replays exactly.
+    Each creature is dealt a side once (left, right or behind) from the mind's own seeded stream and keeps it, so
+    the horde splits instead of queueing on the firing line; a creature already close rushes. Two runs with
+    different mind seeds differ while each replays exactly.
     """
 
     name = "flank"
     model = "heuristic"
 
-    def __init__(self, seed: int = 0, *, ring: float = 140.0) -> None:
+    def __init__(self, seed: int = 0, *, ring: float = 150.0) -> None:
         self._rng = random.Random(int(seed))
         self._ring = float(ring)
+        self._sides: dict[int, str] = {}
 
     def _target(self, observation: Observation, creature: CreatureView) -> Steer:
-        arena = float(observation.arena)
-        px, py = observation.player_x, observation.player_y
-        aim_dx, aim_dy = observation.player_aim_x - px, observation.player_aim_y - py
-        norm = math.hypot(aim_dx, aim_dy)
-        if norm < 1e-6:
-            aim_dx, aim_dy, norm = 1.0, 0.0, 1.0
-        aim_dx, aim_dy = aim_dx / norm, aim_dy / norm
-        roll = self._rng.random()
-        if roll < 0.4:
-            side_x, side_y = -aim_dy, aim_dx
-        elif roll < 0.8:
-            side_x, side_y = aim_dy, -aim_dx
-        else:
-            side_x, side_y = -aim_dx, -aim_dy
-        close = math.hypot(creature.x - px, creature.y - py) < self._ring * 0.6
-        ring = 0.0 if close else self._ring
-        return Steer(
-            creature_index=creature.index,
-            target_x=clamp_arena(px + side_x * ring, arena),
-            target_y=clamp_arena(py + side_y * ring, arena),
-        )
+        from .tactics import steer_for_move
+
+        side = self._sides.get(creature.index)
+        if side is None:
+            side = self._rng.choice(("flank_left", "flank_right", "behind"))
+            self._sides[creature.index] = side
+        dist = math.hypot(creature.x - observation.player_x, creature.y - observation.player_y)
+        move = "rush" if dist < self._ring * 0.5 else side
+        return steer_for_move(move, observation, creature, ring=self._ring)
 
     def decide(self, observation: Observation) -> Decision:
         steers = tuple(self._target(observation, creature) for creature in observation.owned)
         prompt_tokens, completion_tokens = _standin_tokens(observation, len(steers))
         return Decision(steers=steers, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
+
+
+class SurroundMind:
+    """Encircles, then collapses: each creature takes an evenly spaced slot on a ring round the player and, once
+    enough of them are in place, all rush at once. The slot order is dealt from the mind's own seeded stream.
+
+    Against a pilot that kites away from the nearest creature, a column can be outrun and a ring cannot.
+    """
+
+    name = "surround"
+    model = "heuristic"
+
+    def __init__(self, seed: int = 0, *, ring: float = 170.0, collapse_share: float = 0.6) -> None:
+        self._rng = random.Random(int(seed))
+        self._ring = float(ring)
+        self._collapse_share = float(collapse_share)
+        self._slots: dict[int, float] = {}
+
+    def decide(self, observation: Observation) -> Decision:
+        owned = observation.owned
+        if not owned:
+            prompt_tokens, completion_tokens = _standin_tokens(observation, 0)
+            return Decision(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
+        for creature in owned:
+            if creature.index not in self._slots:
+                self._slots[creature.index] = self._rng.random() * math.tau
+        px, py = observation.player_x, observation.player_y
+        arena = float(observation.arena)
+        in_place = sum(1 for c in owned if math.hypot(c.x - px, c.y - py) <= self._ring * 1.4)
+        collapse = in_place >= max(1, int(math.ceil(len(owned) * self._collapse_share)))
+        steers = []
+        for creature in owned:
+            if collapse:
+                steers.append(Steer(creature_index=creature.index, target_x=clamp_arena(px, arena), target_y=clamp_arena(py, arena)))
+                continue
+            angle = self._slots[creature.index]
+            steers.append(
+                Steer(
+                    creature_index=creature.index,
+                    target_x=clamp_arena(px + math.cos(angle) * self._ring, arena),
+                    target_y=clamp_arena(py + math.sin(angle) * self._ring, arena),
+                ),
+            )
+        prompt_tokens, completion_tokens = _standin_tokens(observation, len(steers))
+        return Decision(steers=tuple(steers), prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)

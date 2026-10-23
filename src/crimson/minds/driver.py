@@ -23,7 +23,7 @@ from .ledger import Account, Ledger, Receipt
 from .llm import Exchange, LlmMind
 from .minds import Mind
 from .observe import creature_is_live, observe
-from .pilot import AimBot
+from .pilot import AimBot, PilotSkill
 
 
 @dataclass(frozen=True)
@@ -55,8 +55,22 @@ class MindsRunConfig:
     # Governed: budgets and ownership enforced. Ungoverned: metered, nothing refused.
     governed: bool = True
     others_limit: int = 12
-    game_mode: GameMode = GameMode.SURVIVAL
+    # "arena" / "edge" / "ring" play the dense custom quests (`crimson.minds.arena`); "survival" the stock trickle.
+    scene: str = "arena"
+    pilot: PilotSkill = field(default_factory=PilotSkill)
     perk_choice: int = 0
+
+    def run_spec(self) -> RunSpec:
+        match self.scene:
+            case "arena" | "edge" | "ring":
+                from .arena import arena_quest
+
+                preset = "edge" if self.scene == "arena" else self.scene
+                return RunSpec(game_mode_id=GameMode.QUESTS, seed=int(self.seed), custom_quest=arena_quest(preset))
+            case "survival":
+                return RunSpec(game_mode_id=GameMode.SURVIVAL, seed=int(self.seed))
+            case _:
+                raise ValueError(f"unknown scene {self.scene!r}; use arena (edge), ring or survival")
 
 
 @dataclass
@@ -72,14 +86,27 @@ class MindsRun:
     mind_s: float = 0.0
     steers_recorded: int = 0
 
+    @property
+    def player_health(self) -> float:
+        return float(self.result.players[0].health)
+
+    @property
+    def damage_taken(self) -> float:
+        """Health lost by the end, floored at a full bar's worth: the horde's score against the pilot."""
+
+        return max(0.0, min(100.0, 100.0 - self.player_health))
+
     def summary(self) -> dict[str, object]:
         return {
             "seed": self.replay.run.seed,
             "rules": self.replay.rules,
+            "scene": "quest" if self.replay.run.custom_quest is not None else "survival",
             "ticks": self.ticks,
             "end_tick": self.end_tick,
             "outcome": str(self.result.outcome),
             "elapsed_ms": self.result.elapsed_ms,
+            "player_health": self.player_health,
+            "damage_taken": self.damage_taken,
             "kills": self.result.kills,
             "score_xp": self.result.players[0].experience,
             "steers_recorded": self.steers_recorded,
@@ -119,13 +146,13 @@ def run_minds(
     if hold < 1:
         raise ValueError("hold must be at least 1")
 
-    run_spec = RunSpec(game_mode_id=config.game_mode, seed=int(config.seed))
+    run_spec = config.run_spec()
     prepared = initialize_run(run_spec, rules=MINDS_RULES)
     session = prepared.session
     world = session.world
     recorder = ReplayRecorder(run_spec, rules=MINDS_RULES)
     source = LiveTickSource()
-    pilot = AimBot()
+    pilot = AimBot(config.pilot)
     ledger = Ledger((bound.account(mind_id) for mind_id, bound in enumerate(minds)), governed=config.governed)
     mind_count = len(minds)
 

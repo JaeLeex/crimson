@@ -43,23 +43,69 @@ what happened.
 ## Running
 
 ```sh
-uv run crimson minds run --mind flank --minds 2 --seed 48879 --ticks 3600
-uv run crimson minds run --mind llm --url http://127.0.0.1:8083 --model qwen2.5-7b-instruct --budget 3000 --price 10
+uv run crimson minds run --mind flank --minds 2 --scene ring --seed 7
+uv run crimson minds run --mind llm --url http://127.0.0.1:8081 --model qwen2.5-1.5b-instruct --budget 120 --price 10
 uv run crimson minds run --mind random --ungoverned
 uv run crimson minds verify <dir>/run.crd
-uv run crimson minds compare --mind flank --seeds 3
+uv run crimson minds compare --mind flank --scene ring --seeds 5
+uv run crimson minds pair scripted-7/run.crd ungoverned-7/run.crd --left-label "native AI" --right-label "flank minds" --out pair.mp4
 ```
 
-`run` plays survival headlessly with an aim-bot pilot (`crimson.minds.pilot`), asks the minds every
-`--cadence` ticks (default 15, so four times a second of game time), verifies the recording by
-re-simulating it, and writes `run.crd`, `receipts.jsonl`, `run.minds.json` and, for a model, one
-`transcript-<mind>.jsonl` per mind (prompt, reply, tokens, steers). `--mind idle` is the scripted baseline:
-no steers, the native AI. `--ungoverned` meters the same things and refuses nothing the simulation would
-accept. `compare` plays the scripted, ungoverned and governed conditions over the same seeds and prints
-one table (kills, elapsed, steers, inferences, tokens, credits, refusals, verification).
+`run` plays a scene headlessly with an aim-bot pilot (`crimson.minds.pilot`), asks the minds every
+`--cadence` ticks (default 15, four times a second of game time), verifies the recording by re-simulating it,
+and writes `run.crd`, `receipts.jsonl`, `run.minds.json` and, for a model, one `transcript-<mind>.jsonl` per
+mind (prompt, reply, tokens, steers). `--mind idle` is the scripted baseline: no steers, the native AI.
+`--ungoverned` meters the same things and refuses nothing the simulation would accept. `compare` plays the
+scripted, ungoverned and governed conditions over the same seeds and prints one table (outcome, health,
+damage, kills, steers, inferences, tokens, credits, refusals, verification). `pair` renders two replays side
+by side with labels, through `crimson replay render` and ffmpeg.
 
-Pool slots are dealt to the minds round-robin (`owner_of`), so each mind owns a share of every wave. A
-mind sees its own creatures under `owned` and the nearest others under `others` (`crimson.minds.observe`).
+### Scenes
+
+Survival opens with a trickle, which no tactic can make interesting, so the default scene is a dense custom
+quest (`crimson.minds.arena`, built with the quest recipe compiler): assault rifle, no drops, four waves of
+small gray aliens at 0, 14, 28 and 42 s. `--scene ring` spawns each wave on a ring round the player, where
+the native chase already attacks from every side; `--scene arena` (`edge`) walks each wave in from one edge,
+where the native chase arrives as a column down the line of fire. `--scene survival` is the stock mode.
+
+### The pilot
+
+A perfect aim bot takes no damage from any horde, so the pilot has a skill dial (`PilotSkill`): its aim moves
+at most `--pilot-aim-lag` units per tick toward the nearest creature (default 40), fire comes in bursts of
+`--pilot-fire-on` ticks with `--pilot-fire-off` ticks of rest (default 20/20), and it walks away from anything
+within 150 units. The same pilot plays every condition of a comparison, so the horde's coordination is what
+differs.
+
+### Tactics
+
+`crimson.minds.tactics` is a six-word vocabulary a mind can speak instead of inventing coordinates:
+`flank_left`, `flank_right` (circle to that side of the player's aim, then close in), `behind`, `rush`,
+`hold`, `spread` (step out of the line of fire). Each resolves to a point relative to the player and the
+direction they aim. The `llm` mind asks for one move per creature by default (`--llm-mode moves`); `coords`
+asks for arena points instead. The `flank` heuristic deals each creature a side once and keeps it; `surround`
+puts each creature on an evenly spaced slot of a ring and, once enough are in place, rushes with all of them.
+
+### What it shows
+
+Ten seeds per condition, 90 s cap, the default pilot:
+
+| scene | mind | pilot deaths | mean alive s | mean kills | mean damage |
+| --- | --- | ---: | ---: | ---: | ---: |
+| ring | idle (native AI) | 3/10 | 59.3 | 84.1 | 42 |
+| ring | flank | 8/10 | 42.9 | 58.6 | 85 |
+| ring | surround | 5/10 | 50.8 | 72.9 | 65 |
+| ring | random | 0/10 | 71.7 | 94.3 | 4 |
+| edge | idle (native AI) | 6/10 | 58.7 | 77.9 | 65 |
+| edge | flank | 2/10 | 67.2 | 88.3 | 30 |
+| edge | surround | 0/10 | 74.1 | 94.6 | 34 |
+| edge | random | 0/10 | 77.7 | 96.0 | 30 |
+
+On the ring the flanking horde kills a pilot the native chase mostly cannot: the pilot kites away from the
+nearest creature, which beats a crowd that all comes straight in, and does not beat one that splits round the
+sides. From an edge the native column is the deadlier shape, and circling only gives the pilot time. Random
+steering is the control: it scatters the horde and the pilot lives. A mind, then, is a measurable change in
+what the horde does, in either direction, under a budget that binds (governed runs show the refusals) and in a
+recording anyone can replay.
 
 ## The ledger
 
@@ -82,8 +128,9 @@ is refused. Ungoverned, nothing is refused; invalid steers are still dropped, si
 | --- | --- |
 | `idle` | nothing: the creatures keep their native AI |
 | `random` | a uniform random arena point per owned creature, from its own seed |
-| `flank` | around the player's aim: each creature to one side of the firing line or behind it, closing in when near |
-| `llm` | an OpenAI-compatible chat-completions server (`llama-server`, or anything serving `/v1/chat/completions`): compact JSON observation in, `{"steers":[{"i":..,"x":..,"y":..}]}` out; lenient parsing, clamped to the arena, unknown indices dropped |
+| `flank` | each creature is dealt one side of the player's aim (left, right or behind) and keeps it; it rushes once near |
+| `surround` | each creature takes a slot on a ring round the player; once enough are in place, all rush |
+| `llm` | an OpenAI-compatible chat-completions server (`llama-server`, or anything serving `/v1/chat/completions`): compact JSON observation in; `{"moves":[{"i":..,"m":"flank_left"}]}` out (or `{"steers":[{"i":..,"x":..,"y":..}]}` in `coords` mode); lenient parsing, clamped to the arena, unknown indices and moves dropped |
 
 The source is `src/crimson/minds/`; the command type is `CreatureSteerCommand` in `src/crimson/sim/commands.py`,
 the session rules in `src/crimson/sim/sessions.py`, the codec rules in `src/crimson/replay/codec.py`.

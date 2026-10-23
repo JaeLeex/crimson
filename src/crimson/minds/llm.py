@@ -17,8 +17,9 @@ import msgspec
 
 from .minds import Decision, Steer, clamp_arena
 from .observe import Observation
+from .tactics import MOVES, steer_for_move
 
-SYSTEM_PROMPT = (
+SYSTEM_PROMPT_COORDS = (
     "You command monsters in Crimsonland, a top-down shooter. The arena is 0..1024 on both axes. "
     "The player stands at (player_x, player_y), aims at (player_aim_x, player_aim_y) and shoots along that line. "
     "Every few ticks (60 ticks = 1 s) you get the monsters you own under `owned` and the nearest others under `others`. "
@@ -27,6 +28,20 @@ SYSTEM_PROMPT = (
     "several, and never queue up along the firing line. "
     'Reply with JSON only, no prose: {"steers":[{"i":<owned index>,"x":<0..1024>,"y":<0..1024>}, ...]}.'
 )
+
+SYSTEM_PROMPT_MOVES = (
+    "You command monsters in Crimsonland, a top-down shooter. The player at (player_x, player_y) aims at "
+    "(player_aim_x, player_aim_y) and shoots along that line; it takes a moment to turn. Every few ticks "
+    "(60 ticks = 1 s) you get your monsters under `owned` and the nearest others under `others`, with hp. "
+    "Give each owned monster one move: flank_left or flank_right (circle to that side of the player's aim, then "
+    "close in), behind (get round the back of the aim), rush (straight at the player), hold (stay put), spread "
+    "(step out of the line of fire). Split your monsters across sides so one burst cannot kill several, send "
+    "the healthy ones round and the wounded ones in, and never send everyone down the firing line. "
+    'Reply with JSON only, no prose: {"moves":[{"i":<owned index>,"m":"<move>"}, ...]}.'
+)
+
+# Kept for callers that import the old name.
+SYSTEM_PROMPT = SYSTEM_PROMPT_COORDS
 
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
@@ -94,8 +109,41 @@ def parse_steers(reply: str, observation: Observation) -> tuple[Steer, ...]:
     return tuple(steers[index] for index in sorted(steers))
 
 
+def parse_moves(reply: str, observation: Observation) -> tuple[Steer, ...]:
+    """The steers a reply of moves resolves to: one per owned index naming a known move; anything else is dropped."""
+
+    match = _JSON_OBJECT_RE.search(reply)
+    if match is None:
+        return ()
+    try:
+        data = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return ()
+    items = data.get("moves") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return ()
+    owned = {creature.index: creature for creature in observation.owned}
+    steers: dict[int, Steer] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item["i"])
+            move = str(item["m"]).strip().lower()
+        except (KeyError, TypeError, ValueError):
+            continue
+        if index not in owned or move not in MOVES:
+            continue
+        steers[index] = steer_for_move(move, observation, owned[index])
+    return tuple(steers[index] for index in sorted(steers))
+
+
 class LlmMind:
-    """A chat-completions model behind the `Mind` protocol."""
+    """A chat-completions model behind the `Mind` protocol.
+
+    `mode="moves"` (the default) asks for one move per creature from the tactics vocabulary; `mode="coords"`
+    asks for arena points.
+    """
 
     def __init__(
         self,
@@ -109,7 +157,11 @@ class LlmMind:
         timeout_s: float = 60.0,
         api_key: str = "",
         json_mode: bool = True,
+        mode: str = "moves",
     ) -> None:
+        if mode not in ("moves", "coords"):
+            raise ValueError(f"unknown LlmMind mode {mode!r}; use moves or coords")
+        self.mode = mode
         self.name = str(name)
         self.model = str(model) or "chat-completions"
         self._url = str(url).rstrip("/")
@@ -125,7 +177,10 @@ class LlmMind:
 
     def _request(self, prompt: str) -> dict[str, Any]:
         body: dict[str, Any] = {
-            "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT_MOVES if self.mode == "moves" else SYSTEM_PROMPT_COORDS},
+                {"role": "user", "content": prompt},
+            ],
             "temperature": self._temperature,
             "max_tokens": self._max_tokens,
         }
@@ -159,7 +214,7 @@ class LlmMind:
                 Exchange(tick=observation.tick, prompt=prompt, reply="", prompt_tokens=0, completion_tokens=0, steers=0, ok=False, error=error),
             )
             return Decision(ok=False, note=error)
-        steers = parse_steers(reply, observation)
+        steers = parse_moves(reply, observation) if self.mode == "moves" else parse_steers(reply, observation)
         self.transcript.append(
             Exchange(
                 tick=observation.tick,

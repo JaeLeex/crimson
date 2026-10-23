@@ -13,7 +13,7 @@ from __future__ import annotations
 from .driver import BoundMind, MindsRun, MindsRunConfig, run_minds
 from .ledger import Account, Ledger, Receipt
 from .llm import Exchange, LlmMind
-from .minds import Decision, FlankMind, IdleMind, Mind, RandomMind, Steer
+from .minds import Decision, FlankMind, IdleMind, Mind, RandomMind, Steer, SurroundMind
 from .observe import CreatureView, Observation, observe
 
 __all__ = [
@@ -33,6 +33,7 @@ __all__ = [
     "RandomMind",
     "Receipt",
     "Steer",
+    "SurroundMind",
     "observe",
     "run_minds",
 ]

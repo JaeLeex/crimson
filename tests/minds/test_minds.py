@@ -233,3 +233,68 @@ def _view(index: int):
     from crimson.minds.observe import CreatureView
 
     return CreatureView(index=index, type_id=0, x=100.0, y=100.0, hp=10.0, max_hp=10.0, heading=0.0, ai_mode=0, size=50.0)
+
+
+def test_the_arena_quest_compiles_and_ends_the_run_under_native_ai() -> None:
+    from crimson.minds.arena import arena_quest
+    from crimson.sim.run_result import RunOutcome
+
+    quest = arena_quest()
+    assert sum(entry.count for entry in quest.entries) >= 90
+    assert sorted({entry.trigger_ms for entry in quest.entries}) == [0, 14000, 28000, 42000]
+    run = run_minds([BoundMind(IdleMind(), budget=None)], MindsRunConfig(seed=SEED, ticks=7200, governed=False, scene="arena"))
+    assert run.result.outcome in (RunOutcome.DEATH, RunOutcome.QUEST_COMPLETED)
+    assert run.end_tick is not None
+    assert _verified(run.replay) == []
+
+
+def test_moves_resolve_to_points_around_the_player() -> None:
+    from crimson.minds.tactics import MOVES, move_target
+
+    observation = msgspec.structs.replace(
+        observe(_survival_session(MINDS_RULES).world, tick=0, elapsed_ms=0.0, owned=()),
+        player_x=512.0,
+        player_y=512.0,
+        player_aim_x=612.0,
+        player_aim_y=512.0,
+    )
+    far = _view(1)  # at (100, 100), far from the player
+    targets = {move: move_target(move, observation, far) for move in MOVES}
+    assert targets["rush"] == (512.0, 512.0)
+    assert targets["hold"] == (100.0, 100.0)
+    # Aim points east; left on screen (y down) is north, right is south, behind is west.
+    assert targets["flank_left"] == pytest.approx((512.0, 362.0))
+    assert targets["flank_right"] == pytest.approx((512.0, 662.0))
+    assert targets["behind"] == pytest.approx((362.0, 512.0))
+    with pytest.raises(ValueError, match="unknown move"):
+        move_target("teleport", observation, far)
+
+
+def test_model_move_replies_are_parsed_and_unknown_moves_dropped() -> None:
+    from crimson.minds.llm import parse_moves
+
+    observation = msgspec.structs.replace(
+        observe(_survival_session(MINDS_RULES).world, tick=0, elapsed_ms=0.0, owned=()),
+        player_x=512.0,
+        player_y=512.0,
+        player_aim_x=612.0,
+        player_aim_y=512.0,
+        owned=(_view(7),),
+    )
+    reply = '{"moves":[{"i":7,"m":"Flank_Left"},{"i":8,"m":"rush"},{"i":7,"m":"teleport"}]}'
+    steers = parse_moves(reply, observation)
+    assert [steer.creature_index for steer in steers] == [7]
+    assert (steers[0].target_x, steers[0].target_y) == (512.0, 362.0)
+    assert parse_moves('{"moves":[{"i":7,"m":"nope"}]}', observation) == ()
+
+
+def test_the_pilot_skill_dial_changes_the_damage_the_horde_lands() -> None:
+    from crimson.minds.pilot import PilotSkill
+
+    shooting = run_minds([BoundMind(IdleMind(), budget=None)], MindsRunConfig(seed=SEED, ticks=1800, governed=False, scene="arena", pilot=PilotSkill()))
+    unarmed = run_minds(
+        [BoundMind(IdleMind(), budget=None)],
+        MindsRunConfig(seed=SEED, ticks=1800, governed=False, scene="arena", pilot=PilotSkill(fire_on=0, fire_off=1)),
+    )
+    assert unarmed.damage_taken >= shooting.damage_taken
+    assert unarmed.result.kills <= shooting.result.kills
