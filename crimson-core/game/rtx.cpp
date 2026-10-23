@@ -57,7 +57,9 @@ void console_cmd_toggle_rtx(void) {
 static bool rtx_drawing() { return rtx_render_mode && platform_outputs() && !grim_render_disabled; }
 
 int rtx_collect_lights(float *out, int capacity);
+const float *rtx_build_occlusion(const float *lights, int count, bool shadows, float *grid, int *value_count);
 extern vec2f_t camera_offset;
+extern crimson_cfg_t config_blob;
 
 // The world's bounds in the frame (game/rtx/rtx.patch): what Grim batched before
 // a bound belongs to the side it was drawn on. The world's lights go first.
@@ -70,6 +72,12 @@ void rtx_world(int begin) {
     int count = rtx_collect_lights(lights, 32);
     const float camera[2] = {camera_offset.x, camera_offset.y};
     host_scene(camera, lights, count);
+    float grid[6];
+    int value_count;
+    bool shadows = config_blob.shadows_enabled;
+    const float *values = rtx_build_occlusion(lights, count, shadows, grid, &value_count);
+    grid[5] = shadows;
+    host_occlusion(grid, values, value_count);
   }
   host_render_pass(begin ? HOST_PASS_WORLD_BEGIN : HOST_PASS_WORLD_END);
 }
@@ -81,6 +89,14 @@ void rtx_material(int pass) {
     return;
   grim_interface_ptr->grim_flush_batch();
   host_render_pass(pass);
+}
+
+// One bonus quad in its material (host_bonus): each carries its own shell center.
+void rtx_bonus(int emblem, float grid_x, float grid_y, float center_x, float center_y) {
+  if (!rtx_drawing())
+    return;
+  grim_interface_ptr->grim_flush_batch();
+  host_bonus(emblem, grid_x, grid_y, center_x, center_y);
 }
 
 // Analytic beams, from src/crimson/render/rtx/beam.py: an ion or Fire Bullets

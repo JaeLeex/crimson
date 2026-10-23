@@ -77,20 +77,32 @@ const char *beam_fragment_source = SHADER_HEADER RTX_SHADER_BEAM_FRAG;
 const char *lit_vertex_source = SHADER_HEADER SHADER_CREATURE_VERT;
 const char *creature_fragment_source = SHADER_HEADER RTX_SHADER_CREATURE_FRAG;
 const char *player_fragment_source = SHADER_HEADER RTX_SHADER_PLAYER_FRAG;
+const char *bonus_fragment_source = SHADER_HEADER RTX_SHADER_BONUS_FRAG;
 
 // RTX lighting: the world's lights and camera (host_scene), the batch being drawn
-// (HOST_PASS_CREATURES, _PLAYERS, or 0 for the device's own shading), and the
-// creature and player programs, which light the device's vertices in the world.
+// (HOST_PASS_CREATURES, _PLAYERS, MATERIAL_BONUS, or 0 for the device's own
+// shading), and the creature, player and bonus programs, which light the
+// device's vertices in the world. A bonus draw's own material (host_bonus): the
+// shell or an emblem, its atlas's cell grid and the shell's center.
 enum { MAX_LIGHTS = 32 };
 int material;
 float scene_camera[2];
 float light_pos[MAX_LIGHTS * 4], light_rgb[MAX_LIGHTS * 4], light_dir[MAX_LIGHTS * 4], light_response[MAX_LIGHTS * 4];
 int light_count;
+int bonus_emblem;
+float bonus_grid[2], bonus_center[2];
 struct LitProgram {
   GLuint id = 0;
-  GLint target_size, camera, count, ambient, pos, rgb, dir, response;
+  GLint target_size, camera, count, ambient, pos, rgb, dir, response, occlusion_grid, occlusion_cell, shadows;
+  GLint pass, grid, shell_center;
 };
-LitProgram creature_lit, player_lit;
+// The creature body grid (host_occlusion): origin, columns (0 for none) and rows,
+// cell size, the shadows setting, and its texels in an RGBA32F texture 256 wide.
+enum { OCCLUSION_WIDTH = 256 };
+float occlusion_grid[4], occlusion_cell = 64;
+int dynamic_shadows, occlusion_rows;
+GLuint occlusion_texture;
+LitProgram creature_lit, player_lit, bonus_lit;
 // Each uploaded artwork's texels in the module (it keeps them), for the creature
 // thickness maps made on a creature atlas's first lit draw.
 std::unordered_map<int, u32> texel_addresses;
@@ -253,10 +265,6 @@ void create_lit(LitProgram &p, const char *fragment) {
   glUniform1i(glGetUniformLocation(p.id, "u_thickness"), 1);
   glUniform1i(glGetUniformLocation(p.id, "u_occlusion_tex"), 2);
   glUniform4f(glGetUniformLocation(p.id, "colDiffuse"), 1, 1, 1, 1);
-  // No creature shadows yet: an empty grid leaves every source visible.
-  glUniform4f(glGetUniformLocation(p.id, "u_occlusion_grid"), 0, 0, 0, 0);
-  glUniform1f(glGetUniformLocation(p.id, "u_occlusion_cell_size"), 64);
-  glUniform1i(glGetUniformLocation(p.id, "u_dynamic_shadows"), 0);
   p.target_size = glGetUniformLocation(p.id, "target_size");
   p.camera = glGetUniformLocation(p.id, "camera");
   p.count = glGetUniformLocation(p.id, "u_count");
@@ -265,6 +273,12 @@ void create_lit(LitProgram &p, const char *fragment) {
   p.rgb = glGetUniformLocation(p.id, "u_rgb");
   p.dir = glGetUniformLocation(p.id, "u_dir");
   p.response = glGetUniformLocation(p.id, "u_response");
+  p.occlusion_grid = glGetUniformLocation(p.id, "u_occlusion_grid");
+  p.occlusion_cell = glGetUniformLocation(p.id, "u_occlusion_cell_size");
+  p.shadows = glGetUniformLocation(p.id, "u_dynamic_shadows");
+  p.pass = glGetUniformLocation(p.id, "u_pass");
+  p.grid = glGetUniformLocation(p.id, "u_grid");
+  p.shell_center = glGetUniformLocation(p.id, "u_shell_center");
 }
 
 // A creature atlas's part sizes (renderer_thickness), made once it is lit; the
@@ -311,18 +325,25 @@ void submit_geometry(u32 primitive, u32 vertices, u32 vertex_count, u32 indices,
   }
 }
 
-// A draw in an RTX creature or player batch, lit as the Python port lights
-// them: creatures always (their ambient fill is 0.6), players only under lights.
+// A draw in an RTX creature, player or bonus batch, lit as the Python port
+// lights them: creatures (their ambient fill is 0.6) and bonuses always, players
+// only under lights.
 bool lit_draw(u32 primitive, u32 vertices, u32 vertex_count, u32 indices, u32 primitive_count) {
   if (!rtx || !world || !material || (material == HOST_PASS_PLAYERS && !light_count))
     return false;
   Target &t = drawing_target(current_target);
-  LitProgram &p = material == HOST_PASS_PLAYERS ? player_lit : creature_lit;
+  LitProgram &p = material == HOST_PASS_PLAYERS ? player_lit : material == MATERIAL_BONUS ? bonus_lit : creature_lit;
   glUseProgram(p.id);
+  glUniform1i(p.pass, bonus_emblem);
+  glUniform2fv(p.grid, 1, bonus_grid);
+  glUniform2fv(p.shell_center, 1, bonus_center);
   glUniform2f(p.target_size, (float)t.logical_width, (float)t.logical_height);
   glUniform2f(p.camera, scene_camera[0], scene_camera[1]);
   glUniform1i(p.count, light_count);
   glUniform1f(p.ambient, 0.6f);
+  glUniform4fv(p.occlusion_grid, 1, occlusion_grid);
+  glUniform1f(p.occlusion_cell, occlusion_cell);
+  glUniform1i(p.shadows, dynamic_shadows);
   if (light_count) {
     glUniform4fv(p.pos, light_count, light_pos);
     glUniform4fv(p.rgb, light_count, light_rgb);
@@ -342,7 +363,7 @@ bool lit_draw(u32 primitive, u32 vertices, u32 vertex_count, u32 indices, u32 pr
   glBindTexture(GL_TEXTURE_2D, material == HOST_PASS_CREATURES && present ? thickness_map(bound[0]) : blank_texture);
   glBindSampler(1, 0);
   glActiveTexture(GL_TEXTURE2);
-  glBindTexture(GL_TEXTURE_2D, blank_texture);
+  glBindTexture(GL_TEXTURE_2D, occlusion_grid[2] ? occlusion_texture : blank_texture);
   glBindSampler(2, 0);
   glActiveTexture(GL_TEXTURE0);
   apply_output_state(t);
@@ -500,6 +521,7 @@ bool GL_ENTRY(renderer_set_rtx)(bool enabled) {
     u_beam_color = glGetUniformLocation(beam_program, "beam_color");
     create_lit(creature_lit, creature_fragment_source);
     create_lit(player_lit, player_fragment_source);
+    create_lit(bonus_lit, bonus_fragment_source);
     glGenVertexArrays(1, &beam_array);
     glBindVertexArray(beam_array);
     glGenBuffers(1, &beam_buffer);
@@ -768,6 +790,37 @@ void GL_ENTRY(w2c_host_scene)(struct w2c_host *, u32 camera, u32 lights, u32 cou
     memcpy(light_dir + i * 4, packed + i * 16 + 8, 16);
     memcpy(light_response + i * 4, packed + i * 16 + 12, 16);
   }
+}
+void GL_ENTRY(w2c_host_occlusion)(struct w2c_host *, u32 grid, u32 values, u32 count) {
+  const float *g = (const float *)(client_memory() + grid);
+  occlusion_grid[0] = g[0], occlusion_grid[1] = g[1], occlusion_grid[2] = count ? g[2] : 0, occlusion_grid[3] = g[3];
+  occlusion_cell = g[4];
+  dynamic_shadows = g[5] != 0;
+  if (!count)
+    return;
+  // Whole rows, and a texture that grows in powers of two as crowds do.
+  int rows = (int)((count + OCCLUSION_WIDTH * 4 - 1) / (OCCLUSION_WIDTH * 4));
+  if (rows > occlusion_rows) {
+    occlusion_rows = 1;
+    while (occlusion_rows < rows)
+      occlusion_rows *= 2;
+    if (!occlusion_texture)
+      glGenTextures(1, &occlusion_texture);
+    glBindTexture(GL_TEXTURE_2D, occlusion_texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, OCCLUSION_WIDTH, occlusion_rows, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  }
+  std::vector<float> texels((size_t)rows * OCCLUSION_WIDTH * 4);
+  memcpy(texels.data(), client_memory() + values, (size_t)count * 4);
+  glBindTexture(GL_TEXTURE_2D, occlusion_texture);
+  glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, OCCLUSION_WIDTH, rows, GL_RGBA, GL_FLOAT, texels.data());
+}
+void GL_ENTRY(w2c_host_bonus)(struct w2c_host *, u32 emblem, f32 grid_x, f32 grid_y, f32 center_x, f32 center_y) {
+  material = MATERIAL_BONUS;
+  bonus_emblem = (int)emblem;
+  bonus_grid[0] = grid_x, bonus_grid[1] = grid_y;
+  bonus_center[0] = center_x, bonus_center[1] = center_y;
 }
 void GL_ENTRY(w2c_host_render_pass)(struct w2c_host *, u32 pass) {
   if (pass >= HOST_PASS_CREATURES) {
