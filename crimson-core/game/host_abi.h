@@ -46,6 +46,9 @@ HOST_IMPORT(smoke) void host_smoke(const float *commands, int count);
 // Sharpshooter sight (its near and far ends).
 HOST_IMPORT(smoke_draw) void host_smoke_draw(const float *view, const float *lights, int light_count,
                                               const float *sights, int sight_count);
+// Monster Vision's ground light (render/rtx/perk_lighting.py), sent before the
+// world's begin mark: `count` auras as world x, y and alpha.
+HOST_IMPORT(perk_light) void host_perk_light(const float *sources, int count);
 // Draws into the terrain until the next mark are its decals of a HOST_GROUND_*
 // material, deposited at `seconds` on the run's clock (render/rtx/materials.py).
 HOST_IMPORT(ground) void host_ground(int kind, float seconds);

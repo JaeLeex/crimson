@@ -19,6 +19,7 @@ from ...perks import PerkId
 from ..world.constants import monster_vision_fade_alpha
 from .hdr import _HDR_TONEMAP_VS_330
 from .material_shaders import MONSTER_VISION_FRAGMENT
+from .shaders import glsl
 
 if TYPE_CHECKING:
     from ..frame import RenderFrame
@@ -51,19 +52,7 @@ void main() {
 }
 """
 
-ANALYTIC_AURA_FRAGMENT = r"""
-#version 330
-in vec2 fragTexCoord;
-in vec4 fragColor;
-out vec4 finalColor;
-void main() {
-    float r = length((fragTexCoord - .5) * 2.);
-    float envelope = 1. - smoothstep(.8, 1., r);
-    // Fit to the original AURA cell's alpha; retain its 90-unit footprint and yellow tint.
-    float alpha = clamp(1.04770258 * exp(-4.85 * r) * envelope, 0., 1.);
-    finalColor = vec4(fragColor.rgb, fragColor.a * alpha);
-}
-"""
+ANALYTIC_AURA_FRAGMENT = glsl("perk_aura.frag")
 
 
 class MonsterVisionSource(msgspec.Struct, frozen=True):

@@ -1,6 +1,6 @@
 The RTX mode (game/rtx.cpp) marks the world's bounds in the frame, for the host's HDR target, the terrain's
-decals by material, the batches the host lights and the smoke the ticks make (game/rtx_smoke.cpp), which it draws in
-place of native puffs; it draws the ion and Fire Bullets streaks as analytic beams, and registers console commands.
+decals by material, the batches the host lights, Monster Vision's auras, and the explosions and smoke the ticks make
+(game/rtx_lights.cpp, rtx_smoke.cpp); it draws analytic beams and the fluid smoke, and registers console commands.
 --- a/decomp/1.9/crimsonland/game/gameplay_render_world.cpp
 +++ b/decomp/1.9/crimsonland/game/gameplay_render_world.cpp
 @@ -89,6 +89,7 @@
@@ -63,7 +63,15 @@ place of native puffs; it draws the ion and Fire Bullets streaks as analytic bea
                      int effect_id = fx_spawn_sprite(
                          (const vec2f_t*)&trail_pos, (const vec2f_t*)&trail_velocity, 14.0f);
                      secondary_projectile_pool[secondary_index].pos.vx.vy.trail_distance = 0.06f;
-@@ -962,6 +971,7 @@
+@@ -850,6 +859,7 @@
+                     if (type_id == SECONDARY_PROJECTILE_TYPE_ROCKET) {
+                         damage = secondary_projectile_pool[secondary_index].life_timer * 50.0f + 500.0f;
+                         if (config_detail_preset >= 3) {
++                            RtxDarkExplosion rtx_dark;
+                             effect_spawn_explosion_burst((vec2f_t*)&secondary_position, 0.4f);
+                         }
+                     } else if (type_id == SECONDARY_PROJECTILE_TYPE_SEEKER_ROCKET) {
+@@ -962,6 +972,7 @@
                              velocity_x,
                              magnitude * burst_direction.y,
                          };
@@ -71,7 +79,7 @@ place of native puffs; it draws the ion and Fire Bullets streaks as analytic bea
                          int effect_id = fx_spawn_sprite(
                              (vec2f_t*)&secondary_position, (vec2f_t*)&velocity, 14.0f);
                          sprite_effect_pool[effect_id].color_a = 0.37f;
-@@ -974,10 +984,14 @@
+@@ -974,10 +985,14 @@
                      secondary_projectile_pool[secondary_index].pos.vx.vel_x = 0.0f;
                      secondary_projectile_pool[secondary_index].pos.vx.vy.vel_y = 0.5f;
                  }
@@ -313,12 +321,15 @@ place of native puffs; it draws the ion and Fire Bullets streaks as analytic bea
  }
 --- a/decomp/1.9/crimsonland/effects/effect_spawn.cpp
 +++ b/decomp/1.9/crimsonland/effects/effect_spawn.cpp
-@@ -79,5 +79,7 @@
+@@ -79,5 +79,10 @@
      } else if (size_code == 0x80) {
          EFFECT_BUILD_QUAD(effect_uv2, effect_uv_step_2);
      }
-+    if (effect_id == 0x11 && entry != &effect_discard_entry)
-+        rtx_smoke_puff(entry);
++    if (entry != &effect_discard_entry) {
++        rtx_explosion_effect(effect_id, entry);
++        if (effect_id == 0x11)
++            rtx_smoke_puff(entry);
++    }
      return entry;
  }
 --- a/decomp/1.9/crimsonland/effects/effects_render.cpp
@@ -377,6 +388,42 @@ place of native puffs; it draws the ion and Fire Bullets streaks as analytic bea
      frame_dt = unscaled_frame_dt;
      frame_dt_ms = (int)(unscaled_frame_dt * 1000.0f);
  
+--- a/decomp/1.9/crimsonland/effects/effect_spawn_explosion_burst.cpp
++++ b/decomp/1.9/crimsonland/effects/effect_spawn_explosion_burst.cpp
+@@ -15,6 +15,7 @@
+     const vec2f_t *pos,
+     float scale)
+ {
++    RtxExplosion rtx_explosion(pos->x, pos->y, scale);
+     effect_color_t core_color = {0.6f, 0.6f, 0.6f, 1.0f};
+ 
+     effect_template.flags = 0x19;
+--- a/decomp/1.9/crimsonland/effects/effects_update.cpp
++++ b/decomp/1.9/crimsonland/effects/effects_update.cpp
+@@ -5,6 +5,7 @@
+ {
+     int index;
+     int count = game_effects_extent();
++    rtx_explosions_age(frame_dt);
+ 
+     for (index = 0; index < count; ++index) {
+         effect_entry_t *entry = game_effects_entry(index);
+--- a/decomp/1.9/crimsonland/ui_render/creature_render_all.cpp
++++ b/decomp/1.9/crimsonland/ui_render/creature_render_all.cpp
+@@ -49,11 +49,13 @@
+                 }
+                 grim_interface_ptr->grim_set_color(
+                     1.0f, 1.0f, 0.0f, alpha * transition_alpha);
++                rtx_aura(1);
+                 grim_interface_ptr->grim_draw_quad(
+                     camera_offset_x + death_timer[1] - 45.0f,
+                     camera_offset_y + death_timer[2] - 45.0f,
+                     90.0f,
+                     90.0f);
++                rtx_aura(0);
+             }
+ 
+             if (creature->plague_infected) {
 --- a/decomp/1.9/crimsonland/crimsonland/crimsonland_main.cpp
 +++ b/decomp/1.9/crimsonland/crimsonland/crimsonland_main.cpp
 @@ -204,6 +204,12 @@

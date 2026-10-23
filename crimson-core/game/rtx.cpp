@@ -24,9 +24,11 @@ static const char *rtx_mode_name(int mode) { return mode ? "rtx" : "classic"; }
 void rtx_smoke_reset();
 extern int rtx_smoke_on;
 
+void rtx_reset();
+
 static void rtx_set_mode(int requested) {
   rtx_render_mode = platform_outputs() ? host_render_mode(requested) : 0;
-  rtx_smoke_reset();
+  rtx_reset();
 }
 
 // The mode the host's launch options ask for (--rtx, CRIMSON_RTX).
@@ -75,6 +77,10 @@ static bool rtx_drawing() { return rtx_render_mode && platform_outputs() && !gri
 
 int rtx_collect_lights(float *out, int capacity);
 extern const float rtx_beam_tuning[4];
+int rtx_collect_monster_vision(float *out, int capacity, float alpha);
+void rtx_explosions_reset();
+void effect_select_texture(int effect_id);
+extern float ui_transition_alpha;
 const float *rtx_build_occlusion(const float *lights, int count, bool shadows, float *grid, int *value_count);
 extern vec2f_t camera_offset;
 extern crimson_cfg_t config_blob;
@@ -110,6 +116,8 @@ void rtx_world(int begin) {
     const float *values = rtx_build_occlusion(lights, count, shadows, grid, &value_count);
     grid[5] = shadows;
     host_occlusion(grid, values, value_count);
+    static float auras[385 * 3];
+    host_perk_light(auras, rtx_collect_monster_vision(auras, 385, ui_transition_alpha));
   }
   host_render_pass(begin ? HOST_PASS_WORLD_BEGIN : HOST_PASS_WORLD_END);
 }
@@ -122,6 +130,29 @@ void rtx_smoke(float alpha) {
     return;
   grim_interface_ptr->grim_flush_batch();
   rtx_smoke_draw(rtx_lights, rtx_light_count, alpha);
+}
+
+// Monster Vision's aura quad (creature_render_all) as RTX's analytic glow over
+// the whole quad, then back to the atlas cell the other overlays take.
+void rtx_aura(int begin) {
+  if (!rtx_drawing())
+    return;
+  grim_interface_ptr->grim_flush_batch();
+  if (begin) {
+    grim_interface_ptr->grim_set_uv(0, 0, 1, 1);
+    host_render_pass(HOST_PASS_AURA);
+  } else {
+    host_render_pass(HOST_PASS_SPRITES);
+    effect_select_texture(0x10);
+  }
+}
+
+// What RTX keeps beside a run, cleared when a run starts or is restored and
+// when the mode changes: the fluid smoke and the explosions' lights.
+void rtx_smoke_reset();
+void rtx_reset() {
+  rtx_smoke_reset();
+  rtx_explosions_reset();
 }
 
 // The batches the host lights (HOST_PASS_CREATURES, _PLAYERS), and the return to

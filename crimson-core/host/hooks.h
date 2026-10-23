@@ -66,6 +66,14 @@ void rtx_smoke_wake(int type, float sx, float sy, float ex, float ey, float dt);
 void rtx_smoke_impulse(float sx, float sy, float ex, float ey, float radius, float strength, float curl, int kind,
                        float duration, float expansion_speed);
 void rtx_smoke_tick(float dt);
+void rtx_reset();
+// RTX explosion lights and Monster Vision's analytic aura (game/rtx_lights.cpp, game/rtx.cpp).
+void rtx_explosion_begin(float x, float y, float scale);
+void rtx_explosion_end();
+void rtx_explosion_dark(int dark);
+void rtx_explosion_effect(int effect_id, const struct effect_entry_t *entry);
+void rtx_explosions_age(float dt);
+void rtx_aura(int begin);
 void rtx_smoke(float alpha);
 void console_cmd_rtx_smoke(void);
 void rtx_beam_body(float origin_x, float origin_y, float head_x, float head_y, float start, float span, float step,
@@ -79,6 +87,14 @@ struct RtxSmokeMuzzle {
 struct RtxSmokeRocket {
   RtxSmokeRocket(float flow_x, float flow_y, float vx, float vy) { rtx_smoke_rocket(flow_x, flow_y, vx, vy); }
   ~RtxSmokeRocket() { rtx_smoke_source_end(); }
+};
+struct RtxExplosion {
+  RtxExplosion(float x, float y, float scale) { rtx_explosion_begin(x, y, scale); }
+  ~RtxExplosion() { rtx_explosion_end(); }
+};
+struct RtxDarkExplosion {
+  RtxDarkExplosion() { rtx_explosion_dark(1); }
+  ~RtxDarkExplosion() { rtx_explosion_dark(0); }
 };
 struct RtxSmokeNuke {
   RtxSmokeNuke() { rtx_smoke_nuke(); }

@@ -87,6 +87,9 @@ const char *smoke_splat_source = SHADER_HEADER RTX_SHADER_SMOKE_SPLAT_FRAG;
 const char *smoke_impulse_source = SHADER_HEADER RTX_SHADER_SMOKE_IMPULSE_FRAG;
 const char *smoke_fragment_source = SHADER_HEADER RTX_SHADER_SMOKE_FRAG;
 const char *blit_fragment_source = SHADER_HEADER SHADER_BLIT_FRAG;
+const char *aura_fragment_source = SHADER_HEADER RTX_SHADER_PERK_AURA_FRAG;
+const char *monster_vision_vertex_source = SHADER_HEADER SHADER_MONSTER_VISION_VERT;
+const char *monster_vision_fragment_source = SHADER_HEADER SHADER_MONSTER_VISION_FRAG;
 
 // RTX lighting: the world's lights and camera (host_scene), the batch being drawn
 // (HOST_PASS_CREATURES, _PLAYERS, MATERIAL_BONUS, or 0 for the device's own
@@ -117,7 +120,14 @@ enum { OCCLUSION_WIDTH = 256 };
 float occlusion_grid[4], occlusion_cell = 64;
 int dynamic_shadows, occlusion_rows;
 GLuint occlusion_texture;
-LitProgram creature_lit, player_lit, bonus_lit;
+LitProgram creature_lit, player_lit, bonus_lit, aura_lit;
+// Monster Vision's ground light (host_perk_light, render/rtx/perk_lighting.py):
+// its auras as world x, y and alpha, the additive pass that sums their light
+// on the ground, and the float accumulator the ground program adds.
+enum { MONSTER_VISION_RADIUS = 60 };
+std::vector<float> perk_sources;
+GLuint monster_vision_program;
+Target perk_target;
 // The RTX ground (render/rtx/materials.py): companions of the terrain target,
 // made from it as it stands on first use and dropped when it is cleared,
 // replaced or released, or RTX ends. The substrate is the terrain and its decals
@@ -373,7 +383,10 @@ bool lit_draw(u32 primitive, u32 vertices, u32 vertex_count, u32 indices, u32 pr
   if (!rtx || !world || !material || material == HOST_PASS_GROUND || (material == HOST_PASS_PLAYERS && !light_count))
     return false;
   Target &t = drawing_target(current_target);
-  LitProgram &p = material == HOST_PASS_PLAYERS ? player_lit : material == MATERIAL_BONUS ? bonus_lit : creature_lit;
+  LitProgram &p = material == HOST_PASS_PLAYERS ? player_lit
+                  : material == MATERIAL_BONUS  ? bonus_lit
+                  : material == HOST_PASS_AURA  ? aura_lit
+                                                : creature_lit;
   glUseProgram(p.id);
   glUniform1i(p.pass, bonus_emblem);
   glUniform2fv(p.grid, 1, bonus_grid);
@@ -576,6 +589,79 @@ void smoke_add(GLuint p, const float *rect) {
   smoke_rect(p, rect);
 }
 
+// Device vertices the host makes (x, y, z, rhw, D3DCOLOR, u, v), as a triangle list.
+struct HostVertex {
+  float x, y, z, rhw;
+  u32 color;
+  float u, v;
+};
+void submit_vertices(const std::vector<HostVertex> &vertices) {
+  glBindVertexArray(vertex_array);
+  glBindBuffer(GL_ARRAY_BUFFER, vertex_buffer);
+  glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(vertices.size() * sizeof(HostVertex)), vertices.data(), GL_STREAM_DRAW);
+  glDrawArrays(GL_TRIANGLES, 0, (GLsizei)vertices.size());
+}
+
+// Each aura's quad, its 60-unit support clipped to the view on `t`; its texture
+// coordinates carry its world center and its alpha the aura's.
+std::vector<HostVertex> monster_vision_quads(const Target &t) {
+  std::vector<HostVertex> quads;
+  float lo_x = -scene_camera[0], lo_y = -scene_camera[1];
+  float hi_x = lo_x + t.logical_width, hi_y = lo_y + t.logical_height;
+  for (size_t i = 0; i + 2 < perk_sources.size(); i += 3) {
+    float x = perk_sources[i], y = perk_sources[i + 1], r = MONSTER_VISION_RADIUS;
+    float x0 = std::max(lo_x, x - r), y0 = std::max(lo_y, y - r), x1 = std::min(hi_x, x + r), y1 = std::min(hi_y, y + r);
+    if (x1 <= x0 || y1 <= y0)
+      continue;
+    u32 color = (u32)(perk_sources[i + 2] * 255 + 0.5f) << 24 | 0xffffff;
+    auto corner = [&](float cx, float cy) {
+      return HostVertex{cx + scene_camera[0], cy + scene_camera[1], 0, 1, color, x, y};
+    };
+    for (HostVertex v : {corner(x0, y0), corner(x0, y1), corner(x1, y1), corner(x0, y0), corner(x1, y1), corner(x1, y0)})
+      quads.push_back(v);
+  }
+  return quads;
+}
+
+// Monster Vision's light summed into the accumulator, ONE + ONE: each aura's
+// shadowless direct and reflected light on the ground beneath it.
+void accumulate_monster_vision(const Ground &g, const Target &t) {
+  if (perk_target.width != t.width || perk_target.height != t.height) {
+    release(perk_target);
+    perk_target.width = t.width, perk_target.height = t.height;
+    perk_target.flags = TARGET_RENDER | TARGET_FLOAT;
+    allocate(perk_target);
+  }
+  perk_target.logical_width = t.logical_width, perk_target.logical_height = t.logical_height;
+  bind_framebuffer(perk_target);
+  glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+  glClearColor(0, 0, 0, 0);
+  glClear(GL_COLOR_BUFFER_BIT);
+  glEnable(GL_BLEND);
+  glBlendEquation(GL_FUNC_ADD);
+  glBlendFunc(GL_ONE, GL_ONE);
+  glDisable(GL_CULL_FACE);
+  GLuint p = monster_vision_program;
+  glUseProgram(p);
+  auto at = [p](const char *name) { return glGetUniformLocation(p, name); };
+  glUniform2f(at("target_size"), (float)t.logical_width, (float)t.logical_height);
+  glUniform2f(at("camera"), scene_camera[0], scene_camera[1]);
+  glUniform2fv(at("u_ground_size"), 1, ground_size);
+  glUniform1f(at("u_time_s"), scene_seconds - g.epoch);
+  glUniform1i(at("u_perk_component"), 0);
+  const GLuint inputs[] = {g.substrate.texture, g.surface.texture, g.coverage.texture, blank_texture};
+  const char *names[] = {"u_substrate_tex", "u_surface_tex", "u_material_tex", "u_occlusion_tex"};
+  for (int i = 0; i < 4; ++i) {
+    glUniform1i(at(names[i]), i);
+    glActiveTexture(GL_TEXTURE0 + i);
+    glBindTexture(GL_TEXTURE_2D, inputs[i]);
+    glBindSampler(i, 0);
+  }
+  glActiveTexture(GL_TEXTURE0);
+  submit_vertices(monster_vision_quads(t));
+  bind_target();
+}
+
 // The terrain drawn into the world, lit as the Python port's ground: its
 // substrate, materials and surface under the frame's lights and body shadows.
 bool ground_draw(u32 primitive, u32 vertices, u32 vertex_count, u32 indices, u32 primitive_count) {
@@ -584,6 +670,9 @@ bool ground_draw(u32 primitive, u32 vertices, u32 vertex_count, u32 indices, u32
     return false;
   Ground &g = ground_of(bound[0]);
   Target &t = drawing_target(current_target);
+  bool perk = !perk_sources.empty();
+  if (perk)
+    accumulate_monster_vision(g, t);
   bind_target();
   GLuint p = ground_program;
   glUseProgram(p);
@@ -594,7 +683,8 @@ bool ground_draw(u32 primitive, u32 vertices, u32 vertex_count, u32 indices, u32
   glUniform1f(at("u_time_s"), scene_seconds - g.epoch);
   glUniform1i(at("u_debug"), 0);
   glUniform1i(at("u_debug_display"), 1);
-  glUniform1i(at("u_has_perk"), 0);
+  glUniform1i(at("u_has_perk"), perk);
+  glUniform4f(at("u_perk_view"), -scene_camera[0], -scene_camera[1], (float)t.logical_width, (float)t.logical_height);
   glUniform1i(at("u_dynamic_shadows"), dynamic_shadows);
   glUniform1i(at("u_spec_light_count"), light_count);
   glUniform1i(at("u_has_beam_lights"), beam_lights);
@@ -610,7 +700,8 @@ bool ground_draw(u32 primitive, u32 vertices, u32 vertex_count, u32 indices, u32
     glUniform4fv(at("u_line_cells"), light_count * 3, line_cells);
   }
   const GLuint inputs[] = {g.substrate.texture, g.surface.texture, g.coverage.texture,
-                           occlusion_grid[2] ? occlusion_texture : blank_texture, blank_texture};
+                           occlusion_grid[2] ? occlusion_texture : blank_texture,
+                           perk ? perk_target.texture : blank_texture};
   const char *names[] = {"u_substrate_tex", "u_surface_tex", "u_material_tex", "u_occlusion_tex", "u_perk_tex"};
   for (int i = 0; i < 5; ++i) {
     glUniform1i(at(names[i]), i);
@@ -776,6 +867,8 @@ bool GL_ENTRY(renderer_set_rtx)(bool enabled) {
     create_lit(creature_lit, creature_fragment_source);
     create_lit(player_lit, player_fragment_source);
     create_lit(bonus_lit, bonus_fragment_source);
+    create_lit(aura_lit, aura_fragment_source);
+    monster_vision_program = link(monster_vision_vertex_source, monster_vision_fragment_source);
     ground_program = link(lit_vertex_source, ground_fragment_source);
     stamp_program = link(lit_vertex_source, stamp_fragment_source);
     glUseProgram(stamp_program);
@@ -813,6 +906,7 @@ bool GL_ENTRY(renderer_set_rtx)(bool enabled) {
   for (Target &t : smoke_targets)
     release(t);
   release(smoke_composite);
+  release(perk_target);
   // Classic keeps an 8-bit back buffer: its draws saturate at white one by one.
   Target &back = textures[0];
   int flags = enabled ? back.flags | TARGET_HALF_FLOAT : back.flags & ~TARGET_HALF_FLOAT;
@@ -1103,6 +1197,10 @@ void GL_ENTRY(w2c_host_scene)(struct w2c_host *, u32 view, u32 lights, u32 count
     memcpy(line_cells + i * 12, l + 20, 48);
     beam_lights |= l[20] > 0;
   }
+}
+void GL_ENTRY(w2c_host_perk_light)(struct w2c_host *, u32 sources, u32 count) {
+  const float *s = (const float *)(client_memory() + sources);
+  perk_sources.assign(s, s + count * 3);
 }
 void GL_ENTRY(w2c_host_ground)(struct w2c_host *, u32 kind, f32 seconds) {
   ground_kind = (int)kind;

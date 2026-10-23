@@ -47,6 +47,8 @@ PROGRAMS = {
     "smoke_splat": (CLIENT_SHADERS / "smoke_rect.vert", RTX_SHADERS / "smoke_splat.frag"),
     "smoke_impulse": (CLIENT_SHADERS / "smoke_rect.vert", RTX_SHADERS / "smoke_impulse.frag"),
     "smoke": (CLIENT_SHADERS / "smoke_field.vert", RTX_SHADERS / "smoke.frag"),
+    "monster_vision": (CLIENT_SHADERS / "monster_vision.vert", CLIENT_SHADERS / "monster_vision.frag"),
+    "perk_aura": (CLIENT_SHADERS / "creature.vert", RTX_SHADERS / "perk_aura.frag"),
 }
 # glslang's arguments per stage: where each stage's uniform block and textures go.
 STAGE_ARGS = {

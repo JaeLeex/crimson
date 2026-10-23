@@ -315,7 +315,7 @@ void main() {
     #else
     if (u_has_perk != 0) {
         vec2 uv = (world - u_perk_view.xy) / u_perk_view.zw;
-        vec3 perk = texture(u_perk_tex, vec2(uv.x, 1. - uv.y)).rgb;
+        vec3 perk = texture(u_perk_tex, vec2(uv.x, V_UP > 0. ? 1. - uv.y : uv.y)).rgb;
         if (u_debug == 5 || u_debug == 14) spec_accum += perk;
         else if (u_debug == 6 || u_debug == 7 || u_debug == 8) {
             direct_unshadowed += perk;

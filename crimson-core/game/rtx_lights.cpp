@@ -14,7 +14,7 @@
 #include <vector>
 
 extern "C" {
-extern int perk_id_radioactive, perk_id_sharpshooter, perk_id_ion_gun_master;
+extern int perk_id_radioactive, perk_id_sharpshooter, perk_id_ion_gun_master, perk_id_monster_vision;
 extern float game_time_s;
 extern vec2f_t camera_offset;
 extern unsigned int grim_backbuffer_width, grim_backbuffer_height;
@@ -289,6 +289,63 @@ void secondary_sources(const secondary_projectile_t &s) {
     exhaust.dx = dx, exhaust.dy = dy, exhaust.length = 6 * scale, exhaust.width = 5 * scale, exhaust.reach = 140;
     exhaust.broad = true;
     exhaust.smoke_gain = 6;
+  }
+}
+
+// --- Explosion lights (effects.py's ExplosionVisual, render/rtx/explosion_shell.py) ---
+// Each explosion burst's flash and fireball, kept apart from the effect slots
+// that draw it: its fireball sprites as they spawned and whether its ring did,
+// aged with the effects. Only light reads them; the run never does.
+struct Fireball {
+  float x, y, vx, vy, half, scale, scale_step;
+};
+struct Explosion {
+  float x, y, scale, age;
+  bool emit_light, ring_spawned;
+  int fireball_count;
+  Fireball fireballs[4];
+  float lifetime() const { return emit_light ? 1.4f : 0.7f; }
+  // The moving sprites' bounds give the emitting footprint; the luminous core
+  // fills about 35% of them.
+  float fireball_radius() const {
+    float age = this->age * 0.5f, extent = fireball_count ? 0.0f : 32 * scale;
+    for (int i = 0; i < fireball_count; ++i) {
+      const Fireball &f = fireballs[i];
+      float dx = f.vx * age + f.x - x, dy = f.vy * age + f.y - y;
+      extent = fmaxf(extent, sqrtf(dx * dx + dy * dy) + f.half * (f.scale + f.scale_step * age));
+    }
+    return fmaxf(12 * scale, fminf(90 * scale, extent * 0.35f));
+  }
+};
+std::vector<Explosion> explosions;
+Explosion *bursting; // the burst being spawned
+bool dark_bursts;    // a rocket hit's burst: its detonation lights it instead
+
+void explosion_sources() {
+  for (const Explosion &e : explosions) {
+    float scale = fmaxf(0.1f, e.scale);
+    // A warm pressure front and its nearby light travel together for 0.65 s.
+    float elapsed = e.age - 0.05f;
+    if (e.emit_light && e.ring_spawned && elapsed >= 0 && elapsed < 0.65f) {
+      float fade = fminf(1, fmaxf(0, (elapsed - 0.28f) / 0.37f));
+      float strength = 1 - fade * fade * (3 - 2 * fade);
+      float radius = 30 + 650 * elapsed;
+      float energy = strength * sqrtf(fminf(1, 100 / radius));
+      Light &shell = add(e.x, e.y, 85 * scale, 0.60f * energy, 0.39f * energy, 0.18f * energy);
+      shell.height = 16 * scale, shell.ring = radius * fmaxf(0.1f, e.scale), shell.width = 8 * scale;
+      shell.illumination = 1.8f, shell.reflection = 0.65f, shell.reach = 100 * scale, shell.broad = true;
+    }
+    if (!e.emit_light || !e.fireball_count || e.age < 0 || e.age >= e.lifetime())
+      continue;
+    // A fast flash, the visible fireball sustained, then a fade with its retimed alpha.
+    float t = e.age;
+    float fade = fminf(1, fmaxf(0, 1 - t / e.lifetime()) / 0.75f);
+    float gain = 0.2f * expf(-t / 0.08f) + 0.8f * powf(fade, 1.1f);
+    float rise = fminf(t / 0.8f, 1);
+    rise = rise * rise * (3 - 2 * rise);
+    Light &fireball = add(e.x, e.y, 330 * scale, 1.8f * gain, 0.92f * gain, 0.3f * gain);
+    fireball.height = (12 + 68 * rise) * scale, fireball.width = e.fireball_radius();
+    fireball.illumination = 6, fireball.reflection = 1.2f, fireball.broad = true;
   }
 }
 
@@ -621,6 +678,7 @@ extern "C" int rtx_collect_lights(float *out, int capacity) {
   }
   for (const secondary_projectile_t &s : secondary_projectile_pool)
     secondary_sources(s);
+  explosion_sources();
   flame_sources();
 
   // Each response selects independently; a source chosen by one alone has the other's gain zeroed.
@@ -654,5 +712,68 @@ extern "C" int rtx_collect_sights(float *out, int capacity) {
       sight_geometry(player_state_table[i], out[count * 4], out[count * 4 + 1], out[count * 4 + 2], out[count * 4 + 3]);
       ++count;
     }
+  return count;
+}
+
+// An explosion burst starting at (x, y) (effect_spawn_explosion_burst), until rtx_explosion_end.
+extern "C" void rtx_explosion_begin(float x, float y, float scale) {
+  if (explosions.size() >= 128)
+    explosions.erase(explosions.begin());
+  explosions.push_back({x, y, scale, 0, !dark_bursts, false, 0, {}});
+  bursting = &explosions.back();
+}
+extern "C" void rtx_explosion_end() { bursting = nullptr; }
+// Whether the next bursts are rocket hits, which the detonation lights instead.
+extern "C" void rtx_explosion_dark(int dark) { dark_bursts = dark; }
+
+// An effect the burst spawned (effect_spawn): its ring, and its fireball sprites
+// as they start out.
+extern "C" void rtx_explosion_effect(int effect_id, const effect_entry_t *entry) {
+  if (!bursting)
+    return;
+  if (effect_id == 0x01)
+    bursting->ring_spawned = true;
+  else if (effect_id == 0x0c && bursting->emit_light && bursting->fireball_count < 4)
+    bursting->fireballs[bursting->fireball_count++] = {entry->pos_x,  entry->pos_y,
+                                                       entry->vel_x,  entry->vel_y,
+                                                       fmaxf(entry->half_width, entry->half_height),
+                                                       entry->scale, entry->scale_step};
+}
+
+// The effects' update (effects_update): explosions age with them and go at the
+// end of their light.
+extern "C" void rtx_explosions_age(float dt) {
+  for (Explosion &e : explosions)
+    e.age += dt;
+  explosions.erase(std::remove_if(explosions.begin(), explosions.end(),
+                                  [](const Explosion &e) { return e.age >= e.lifetime(); }),
+                   explosions.end());
+}
+extern "C" void rtx_explosions_reset() {
+  explosions.clear();
+  bursting = nullptr;
+}
+
+// Monster Vision's ground light (render/rtx/perk_lighting.py): each living or
+// fading creature's aura whose 60-unit support meets the view, at its native
+// death fade and the world's transition `alpha`, as x, y, alpha. No cap.
+extern "C" int rtx_collect_monster_vision(float *out, int capacity, float alpha) {
+  if (!perk_count_get(perk_id_monster_vision) || alpha <= 1e-3f)
+    return 0;
+  const float radius = 60;
+  float lo_x = -camera_offset.x, lo_y = -camera_offset.y;
+  float hi_x = lo_x + grim_backbuffer_width, hi_y = lo_y + grim_backbuffer_height;
+  int count = 0;
+  for (const creature_t &c : creature_pool) {
+    if (!c.active || count >= capacity)
+      continue;
+    float fade = c.death_timer >= 0 ? 1.0f : fminf(1, fmaxf(0, (c.death_timer + 10) * 0.1f));
+    float a = fade * fminf(1, fmaxf(0, alpha));
+    if (a <= 1e-3f || c.pos_x + radius <= lo_x || c.pos_y + radius <= lo_y || c.pos_x - radius >= hi_x ||
+        c.pos_y - radius >= hi_y)
+      continue;
+    out[count * 3] = c.pos_x, out[count * 3 + 1] = c.pos_y, out[count * 3 + 2] = a;
+    ++count;
+  }
   return count;
 }
