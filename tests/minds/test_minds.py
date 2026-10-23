@@ -286,6 +286,10 @@ def test_model_move_replies_are_parsed_and_unknown_moves_dropped() -> None:
     assert [steer.creature_index for steer in steers] == [7]
     assert (steers[0].target_x, steers[0].target_y) == (512.0, 362.0)
     assert parse_moves('{"moves":[{"i":7,"m":"nope"}]}', observation) == ()
+    # A default move covers every owned creature the exceptions leave out.
+    observation = msgspec.structs.replace(observation, owned=(_view(7), _view(8)))
+    steers = parse_moves('{"default":"rush","moves":[{"i":8,"m":"hold"}]}', observation)
+    assert [(steer.creature_index, steer.target_x, steer.target_y) for steer in steers] == [(7, 512.0, 512.0), (8, 100.0, 100.0)]
 
 
 def test_the_pilot_skill_dial_changes_the_damage_the_horde_lands() -> None:

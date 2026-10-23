@@ -37,7 +37,8 @@ SYSTEM_PROMPT_MOVES = (
     "close in), behind (get round the back of the aim), rush (straight at the player), hold (stay put), spread "
     "(step out of the line of fire). Split your monsters across sides so one burst cannot kill several, send "
     "the healthy ones round and the wounded ones in, and never send everyone down the firing line. "
-    'Reply with JSON only, no prose: {"moves":[{"i":<owned index>,"m":"<move>"}, ...]}.'
+    'Reply with JSON only, no prose, and keep it short: {"default":"<move for every owned monster not listed>",'
+    '"moves":[{"i":<owned index>,"m":"<move>"}, ...]} where `moves` lists only the exceptions.'
 )
 
 # Kept for callers that import the old name.
@@ -119,11 +120,18 @@ def parse_moves(reply: str, observation: Observation) -> tuple[Steer, ...]:
         data = json.loads(match.group(0))
     except json.JSONDecodeError:
         return ()
-    items = data.get("moves") if isinstance(data, dict) else None
-    if not isinstance(items, list):
+    if not isinstance(data, dict):
         return ()
     owned = {creature.index: creature for creature in observation.owned}
     steers: dict[int, Steer] = {}
+    default = data.get("default")
+    if isinstance(default, str) and default.strip().lower() in MOVES:
+        move = default.strip().lower()
+        for index, creature in owned.items():
+            steers[index] = steer_for_move(move, observation, creature)
+    items = data.get("moves")
+    if not isinstance(items, list):
+        items = []
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -153,7 +161,7 @@ class LlmMind:
         model: str = "",
         temperature: float = 0.8,
         seed: int | None = None,
-        max_tokens: int = 400,
+        max_tokens: int = 240,
         timeout_s: float = 60.0,
         api_key: str = "",
         json_mode: bool = True,
