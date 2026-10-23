@@ -100,6 +100,24 @@ Ten seeds per condition, 90 s cap, the default pilot:
 | edge | surround | 0/10 | 74.1 | 94.6 | 34 |
 | edge | random | 0/10 | 77.7 | 96.0 | 30 |
 
+A language model on the same ring seed 7, two minds asked once a second (`--cadence 60`), moves mode, 60 s cap;
+the governed minds had 120 credits each at 10 per thousand tokens:
+
+| model | condition | pilot health | kills | steers | inferences | tokens | refused | wall |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Qwen2.5-7B-Instruct | ungoverned | 100 | 81 | 1,176 | 118 | 88,148 | 0 | 17.5 min |
+| Qwen2.5-7B-Instruct | governed | 100 | 84 | 244 | 38 | 23,807 | 99 | 4.1 min |
+| Qwen2.5-1.5B-Instruct | ungoverned | 90 | 90 | 259 | 107 | 87,371 | 0 | 8.4 min |
+| Qwen2.5-1.5B-Instruct | governed | 30 | 85 | 67 | 32 | 23,721 | 80 | 2.1 min |
+
+The 7B model answers well (nine or ten steers per reply, a mix of `behind`, `flank_left`, `flank_right` and
+`rush` as exceptions) but picks `hold` as the default move half the time, so half its horde stands still and
+dies; the pilot takes no damage. The 1.5B model's replies were half unparsable and otherwise `hold`. Governed,
+both ran out of credits after about sixteen asks per mind and the native AI took the horde back (the
+refusals), which with the 1.5B model is when the pilot got hurt. So, on this scene, a two-line flank rule is a
+better general than a small local model, and the model's value here is the governed inference itself:
+charged on tokens, cut off at the budget, falling back, and recorded. Every run above verifies.
+
 On the ring the flanking horde kills a pilot the native chase mostly cannot: the pilot kites away from the
 nearest creature, which beats a crowd that all comes straight in, and does not beat one that splits round the
 sides. From an edge the native column is the deadlier shape, and circling only gives the pilot time. Random
