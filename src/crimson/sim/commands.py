@@ -29,4 +29,32 @@ class TypoSubmitCommand(msgspec.Struct, tag="typo_submit", frozen=True, forbid_u
     player_index: int
 
 
-type GameCommand = PerkMenuOpenCommand | PerkPickCommand | TypoCharCommand | TypoBackspaceCommand | TypoSubmitCommand
+# The longest a steer may hold a creature's target: ten seconds of ticks.
+STEER_HOLD_MAX_TICKS = 600
+
+
+class CreatureSteerCommand(msgspec.Struct, tag="creature_steer", frozen=True, forbid_unknown_fields=True):
+    """A mind's target for one creature on this tick (the minds rules profile, `MINDS_RULES`).
+
+    The creature runs its native AI step first; only the target it then turns toward is replaced
+    (`creature_apply_steer`). Movement, cooldowns and every RNG draw stay native. `mind_id` names
+    the controller for the audit trail; `target_x`/`target_y` are canonical f32 arena coordinates.
+    `hold_ticks` keeps the target for that many ticks (this one included) unless a later steer of the
+    slot replaces it or the creature dies; a mind asked every N ticks records one steer, not N.
+    """
+
+    creature_index: int
+    mind_id: int
+    target_x: float
+    target_y: float
+    hold_ticks: int
+
+
+type GameCommand = (
+    PerkMenuOpenCommand
+    | PerkPickCommand
+    | TypoCharCommand
+    | TypoBackspaceCommand
+    | TypoSubmitCommand
+    | CreatureSteerCommand
+)

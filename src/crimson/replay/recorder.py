@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..game_version import REPLAY_FORMAT_VERSION, REPLAY_RULES, current_replay_game_version
+from ..game_version import MINDS_RULES, REPLAY_FORMAT_VERSION, REPLAY_RULES, current_replay_game_version
 from ..sim.run_result import RunResult
 from ..sim.run_spec import RunSpec
 from .types import Replay, ReplayTick, current_pilot, current_recorder
@@ -15,7 +15,7 @@ class ReplayRecorder:
         game_version: str | None = None,
         seat_keys: tuple[bytes, ...] | None = None,
     ) -> None:
-        if rules not in (1, 2):
+        if rules not in (1, REPLAY_RULES, MINDS_RULES):
             raise ValueError(f"unsupported replay rules {rules}")
         self._rules = rules
         self._run = run

@@ -8,7 +8,10 @@ from grim.sfx_map import SfxId
 from grim.sfx_types import SfxRequest
 
 from ..camera import camera_update_for_players
+from ..creatures.lifecycle import creature_lifecycle_is_alive
 from ..game_modes import GameMode
+from ..game_version import MINDS_RULES
+from ..math_parity import f32
 from ..perks.availability import prepare_perk_availability
 from ..perks.selection import (
     PerkPick,
@@ -19,6 +22,8 @@ from ..tutorial.runtime import tutorial_input_transform
 from ..typo.runtime import TYPO_TIME_SCALE_FACTOR, TypoCommand, typo_gameplay_update
 from ..weapon_runtime.availability import prepare_weapon_availability
 from .commands import (
+    STEER_HOLD_MAX_TICKS,
+    CreatureSteerCommand,
     GameCommand,
     PerkMenuOpenCommand,
     PerkPickCommand,
@@ -31,6 +36,7 @@ from .mode_updates import ModeState, QuestSpawnState
 from .presentation_step import DeterministicPresentationPlan
 from .run_result import RunOutcome, all_players_dead, death_transition_ready
 from .smoke_events import AtmosphereImpulse, SmokeEmission
+from .state_types import TERRAIN_SIZE
 from .terrain_fx import TerrainFxScratch
 from .timing import FrameTiming, reflex_boost_time_scale_factor
 from .world_state import WorldEvents, WorldState
@@ -94,6 +100,13 @@ def _session_timing(world: WorldState, dt: float) -> FrameTiming:
 # ---------------------------------------------------------------------------
 
 
+class SteerHold(msgspec.Struct):
+    """A `creature_steer` still in force: it steers its slot for `ticks_left` more ticks (minds rules)."""
+
+    command: CreatureSteerCommand
+    ticks_left: int
+
+
 class DeterministicSession(msgspec.Struct):
     # Core state
     world: WorldState
@@ -107,6 +120,8 @@ class DeterministicSession(msgspec.Struct):
     mode_state: ModeState = None
     # The perk menu opened in the last tick: the next tick may start with one pick, and closes it either way.
     perk_menu_open: bool = False
+    # Steers still in force from earlier ticks, by slot order (minds rules; see `SteerHold`).
+    steer_holds: list[SteerHold] = msgspec.field(default_factory=list)
 
     @classmethod
     def start(cls, world: WorldState, *, perk_progression_enabled: bool, mode_state: ModeState = None) -> DeterministicSession:
@@ -182,6 +197,55 @@ class DeterministicSession(msgspec.Struct):
         if all_players_dead(self.world.players):
             raise IllegalCommandError(f"{name} while every player is dead")
 
+    def _require_steer_allowed(self, command: CreatureSteerCommand, steers: dict[int, CreatureSteerCommand]) -> None:
+        # A steer is legal only under the minds rules, for a live creature, once per tick, and onto the arena.
+        if self.world.state.rules != MINDS_RULES:
+            raise IllegalCommandError(f"creature_steer under rules {self.world.state.rules}; it needs rules {MINDS_RULES}")
+        if self.world.state.game_mode == GameMode.TYPO:
+            raise IllegalCommandError("creature_steer in Typ-o")
+        entries = self.world.creatures.entries
+        index = int(command.creature_index)
+        if not 0 <= index < len(entries):
+            raise IllegalCommandError(f"creature_steer of slot {index} outside 0..{len(entries) - 1}")
+        if index in steers:
+            raise IllegalCommandError(f"creature_steer of slot {index} twice in one tick")
+        creature = entries[index]
+        if not creature.active or creature.hp <= 0.0 or not creature_lifecycle_is_alive(creature.death_timer):
+            raise IllegalCommandError(f"creature_steer of slot {index}, which holds no live creature")
+        for name, value in (("target_x", command.target_x), ("target_y", command.target_y)):
+            if not (f32(value) == value and 0.0 <= value <= TERRAIN_SIZE):
+                raise IllegalCommandError(f"creature_steer {name} {value!r} must be a canonical f32 in 0..{TERRAIN_SIZE:g}")
+        if not 1 <= int(command.hold_ticks) <= STEER_HOLD_MAX_TICKS:
+            raise IllegalCommandError(f"creature_steer hold_ticks {command.hold_ticks} must be in 1..{STEER_HOLD_MAX_TICKS}")
+
+    def _steers_in_force(self, fresh: dict[int, CreatureSteerCommand]) -> dict[int, CreatureSteerCommand]:
+        """This tick's steers: the fresh commands, then the holds still in force for slots they did not replace.
+
+        A hold ends when its ticks run out, when a fresh steer replaces it, or when its slot no longer holds a
+        live creature (a later spawn in the same slot starts unsteered). Fresh steers with more than one tick
+        become holds for the ticks after this one.
+        """
+
+        entries = self.world.creatures.entries
+        steers = dict(fresh)
+        holds: list[SteerHold] = []
+        for hold in self.steer_holds:
+            index = int(hold.command.creature_index)
+            if index in fresh:
+                continue
+            creature = entries[index]
+            if not creature.active or creature.hp <= 0.0 or not creature_lifecycle_is_alive(creature.death_timer):
+                continue
+            steers[index] = hold.command
+            if hold.ticks_left > 1:
+                holds.append(SteerHold(command=hold.command, ticks_left=hold.ticks_left - 1))
+        for command in fresh.values():
+            if command.hold_ticks > 1:
+                holds.append(SteerHold(command=command, ticks_left=int(command.hold_ticks) - 1))
+        holds.sort(key=lambda hold: int(hold.command.creature_index))
+        self.steer_holds = holds
+        return steers
+
     def apply_command(self, command: GameCommand, *, dt: float) -> PerkPick:
         match command:
             case PerkPickCommand(choice_index=choice_index):
@@ -231,6 +295,7 @@ class DeterministicSession(msgspec.Struct):
         post_apply_sfx: list[SfxId] = []
         perk_picks: list[PerkPick] = []
         typo_commands: list[TypoCommand] = []
+        steers: dict[int, CreatureSteerCommand] = {}
         open_perk_menu = False
         # The perk screen pauses the game: a pick comes right after the menu opened, and a tick without one is Cancel.
         menu_open, self.perk_menu_open = self.perk_menu_open, False
@@ -252,8 +317,13 @@ class DeterministicSession(msgspec.Struct):
                     if self.world.state.game_mode != GameMode.TYPO:
                         raise IllegalCommandError(f"Typ-o command in non-Typo session: {type(command).__name__}")
                     typo_commands.append(command)
+                case CreatureSteerCommand():
+                    self._require_steer_allowed(command, steers)
+                    steers[int(command.creature_index)] = command
                 case _:
                     raise RuntimeError(f"unhandled command type: {type(command).__name__}")
+
+        steers = self._steers_in_force(steers)
 
         # Picks belong to the between-tick prelude (the perk screen pauses the
         # game). A menu request opens mid-tick at the native point, see
@@ -285,6 +355,7 @@ class DeterministicSession(msgspec.Struct):
                 mode_state=self.mode_state,
                 elapsed_ms=elapsed_before_ms,
                 open_perk_menu=open_perk_menu,
+                steers=steers or None,
             )
             self.perk_menu_open = events.perk_menu_opened
 

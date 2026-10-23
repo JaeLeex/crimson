@@ -12,7 +12,7 @@ import crimson.replay.codec as replay_codec_mod
 from crimson import game_version
 from crimson.aim_schemes import AimScheme
 from crimson.game_modes import GameMode
-from crimson.game_version import REPLAY_FORMAT_VERSION, REPLAY_RULES, current_replay_game_version
+from crimson.game_version import MINDS_RULES, REPLAY_FORMAT_VERSION, REPLAY_RULES, current_replay_game_version
 from crimson.math_parity import f32
 from crimson.movement_controls import MovementControlType
 from crimson.quests.level import QuestLevel
@@ -385,10 +385,12 @@ def test_load_rejects_large_zstd_window() -> None:
         load_replay(frame)
 
 
-@pytest.mark.parametrize("rules", [REPLAY_RULES + 1])
+@pytest.mark.parametrize("rules", [MINDS_RULES + 1])
 def test_a_replay_under_other_rules_decodes_but_does_not_play(rules: int) -> None:
     other = msgspec.structs.replace(_replay(), rules=rules)
 
     assert decode_replay_payload(encode_replay_payload(other)).rules == rules
-    with pytest.raises(ReplayRulesError, match=f"recorded under rules {rules}; this build plays rules 1 and {REPLAY_RULES}"):
+    with pytest.raises(
+        ReplayRulesError, match=f"recorded under rules {rules}; this build plays rules 1, {REPLAY_RULES} and {MINDS_RULES}",
+    ):
         PlaybackDriver(other)

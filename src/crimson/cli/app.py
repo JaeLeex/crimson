@@ -3,6 +3,7 @@ from __future__ import annotations
 from importlib.metadata import entry_points
 
 from . import identity as _identity
+from . import minds as _minds
 from . import quest as _quest
 from . import replay as _replay
 from . import root as _root
@@ -14,6 +15,7 @@ replay_app = _replay.replay_app
 app.add_typer(replay_app, name="replay")
 app.add_typer(_quest.quest_app, name="quest")
 app.add_typer(_identity.identity_app, name="identity")
+app.add_typer(_minds.minds_app, name="minds")
 app.add_typer(_save.save_app, name="save")
 # Development tools (the crimson-re workspace package) add their command groups here.
 for entry_point in entry_points(group="crimson.cli"):

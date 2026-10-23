@@ -46,7 +46,7 @@ def _compile(quest_file: Path, seed: int) -> tuple[str, CustomQuest]:
 
 def _find_matching_clear_replay(replays_dir: Path, digest: str) -> Path | None:
     from ..replay.codec import ReplayCodecError, load_replay_file
-    from ..replay.ranked import outcome_reasons, unranked_reasons
+    from ..replay.ranked import outcome_reasons, replay_unranked_reasons
 
     if not replays_dir.is_dir():
         return None
@@ -60,7 +60,7 @@ def _find_matching_clear_replay(replays_dir: Path, digest: str) -> Path | None:
         if custom is None or custom.digest() != digest:
             continue
         # A clear is one player's: `unranked_reasons` refuses a co-op custom quest (`custom_quest_players`).
-        if not unranked_reasons(replay.run) and not outcome_reasons(replay.run, replay.result):
+        if not replay_unranked_reasons(replay) and not outcome_reasons(replay.run, replay.result):
             return path
     return None
 
@@ -118,7 +118,7 @@ def cmd_quest_publish(
     from ..leaderboard.client import leaderboard_url, post_json
     from ..leaderboard.identity import Identity
     from ..replay.codec import ReplayCodecError, encode_replay_payload, load_replay_file, zstd_pack
-    from ..replay.ranked import outcome_reasons, unranked_reasons
+    from ..replay.ranked import outcome_reasons, replay_unranked_reasons
 
     source, quest = _compile(quest_file, seed)
     digest = quest.digest()
@@ -141,7 +141,7 @@ def cmd_quest_publish(
         typer.echo(f"replay {chosen_replay} does not match the compiled quest (expected id {digest[:12]})", err=True)
         raise typer.Exit(code=1)
 
-    reasons = [*unranked_reasons(replay.run), *outcome_reasons(replay.run, replay.result)]
+    reasons = [*replay_unranked_reasons(replay), *outcome_reasons(replay.run, replay.result)]
     if reasons:
         typer.echo(f"replay {chosen_replay} is not a completed ranked clear: {', '.join(reasons)}", err=True)
         raise typer.Exit(code=1)

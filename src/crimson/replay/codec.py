@@ -10,15 +10,24 @@ import zstandard as zstd
 
 from grim.atomic_write import atomic_write_bytes
 
+from ..creatures.runtime import CREATURE_POOL_SIZE
 from ..game_modes import GameMode
-from ..game_version import REPLAY_FORMAT_VERSION
+from ..game_version import MINDS_RULES, REPLAY_FORMAT_VERSION
 from ..math_parity import f32
 from ..quests.custom import CustomQuest, validate_custom_quest
 from ..quests.level import QuestLevel
 from ..quests.types import SpawnEntry
-from ..sim.commands import PerkPickCommand, TypoBackspaceCommand, TypoCharCommand, TypoSubmitCommand
+from ..sim.commands import (
+    STEER_HOLD_MAX_TICKS,
+    CreatureSteerCommand,
+    PerkPickCommand,
+    TypoBackspaceCommand,
+    TypoCharCommand,
+    TypoSubmitCommand,
+)
 from ..sim.run_result import RunOutcome, RunResult
 from ..sim.run_spec import RunSpec, RunSpecV32, RunStatus
+from ..sim.state_types import TERRAIN_SIZE
 from ..terrain_slots import TerrainSlotTriplet
 from ..typo.names import (
     HIGHSCORE_NAME_MAX_CHARS,
@@ -351,7 +360,22 @@ def _validate_result(result: RunResult, run: RunSpec) -> None:
         _require_f32(player.health, field=f"result.players[{index}].health")
 
 
-def _validate_tick(tick: ReplayTick, *, tick_index: int, run: RunSpec) -> None:
+MIND_ID_MAX = 0xFFFF
+
+
+def _validate_steer(command: CreatureSteerCommand, *, field: str, rules: int, run: RunSpec) -> None:
+    _require(rules == MINDS_RULES, f"{field} creature_steer commands require rules {MINDS_RULES}")
+    _require(run.game_mode_id != GameMode.TYPO, f"{field} creature_steer commands are not played in Typ-o")
+    _require_int(command.creature_index, low=0, high=CREATURE_POOL_SIZE - 1, field=f"{field}.creature_index")
+    _require_int(command.mind_id, low=0, high=MIND_ID_MAX, field=f"{field}.mind_id")
+    _require_int(command.hold_ticks, low=1, high=STEER_HOLD_MAX_TICKS, field=f"{field}.hold_ticks")
+    for name in ("target_x", "target_y"):
+        value = getattr(command, name)
+        _require_f32(value, field=f"{field}.{name}")
+        _require(0.0 <= value <= TERRAIN_SIZE, f"{field}.{name} must be in 0..{TERRAIN_SIZE:g}")
+
+
+def _validate_tick(tick: ReplayTick, *, tick_index: int, run: RunSpec, rules: int) -> None:
     field = f"ticks[{tick_index}]"
     _require(
         len(tick.inputs) == run.player_count,
@@ -363,8 +387,14 @@ def _validate_tick(tick: ReplayTick, *, tick_index: int, run: RunSpec) -> None:
             _require_f32(axis, field=f"{input_field}.{name}")
         flags_error = input_flags_validation_error(packed[4])
         _require(flags_error is None, f"{input_field}.flags {flags_error}: 0x{packed[4]:x}")
+    steered: set[int] = set()
     for command_index, command in enumerate(tick.commands):
         command_field = f"{field}.commands[{command_index}]"
+        if isinstance(command, CreatureSteerCommand):
+            _validate_steer(command, field=command_field, rules=rules, run=run)
+            _require(command.creature_index not in steered, f"{command_field} steers slot {command.creature_index} twice")
+            steered.add(command.creature_index)
+            continue
         _require(
             0 <= command.player_index < run.player_count,
             f"{command_field}.player_index {command.player_index} is outside 0..{run.player_count - 1}",
@@ -452,7 +482,7 @@ def validate_replay(replay: Replay) -> None:
     _validate_result(replay.result, replay.run)
     _require(bool(replay.ticks), "replay must contain at least one tick")
     for tick_index, tick in enumerate(replay.ticks):
-        _validate_tick(tick, tick_index=tick_index, run=replay.run)
+        _validate_tick(tick, tick_index=tick_index, run=replay.run, rules=replay.rules)
 
 
 def encode_replay_payload(replay: Replay) -> bytes:

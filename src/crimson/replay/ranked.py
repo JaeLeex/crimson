@@ -18,6 +18,7 @@ from grim.geom import Vec2
 from ..aim_schemes import AimScheme
 from ..camera import camera_update_for_players
 from ..game_modes import GameMode
+from ..game_version import MINDS_RULES
 from ..local_input import PAD_AIM_DIST_MUL_DEFAULT
 from ..movement_controls import MovementControlType
 from ..quests.custom import CustomQuest
@@ -167,6 +168,16 @@ def unranked_reasons(run: RunSpec) -> list[str]:
     return reasons
 
 
+def replay_unranked_reasons(replay: Replay) -> list[str]:
+    """`unranked_reasons` for a whole replay: its run's setup, and the rules it was recorded under."""
+
+    reasons = unranked_reasons(replay.run)
+    if replay.rules == MINDS_RULES:
+        # Steered creatures: the minds profile never ranks (docs/rewrite/minds.md).
+        reasons.append("minds")
+    return reasons
+
+
 def outcome_reasons(run: RunSpec, result: RunResult) -> list[str]:
     finished = _FINISHED.get(GameMode(run.game_mode_id))
     return [] if finished is not None and result.outcome == finished else ["unfinished"]
@@ -237,5 +248,6 @@ __all__ = [
     "ranked_run_seed",
     "ranked_run_spec",
     "ranked_status",
+    "replay_unranked_reasons",
     "unranked_reasons",
 ]

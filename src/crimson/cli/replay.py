@@ -575,7 +575,7 @@ def cmd_replay_verify(
 
     from ..replay import ReplayCodecError, decode_replay_payload, inflate_replay_payload
     from ..replay.driver.playback_driver import PlaybackDriver, ReplayRunnerError
-    from ..replay.ranked import RankedTickMonitor, outcome_reasons, ranked_board, unranked_reasons
+    from ..replay.ranked import RankedTickMonitor, outcome_reasons, ranked_board, replay_unranked_reasons
     from ..sim.run_result import run_result_mismatches
 
     replay_path = _require_replay_path(replay_file, base_dir=base_dir)
@@ -597,7 +597,7 @@ def cmd_replay_verify(
         status = "result_mismatch"
     else:
         status = "ok"
-    unranked = [*unranked_reasons(replay.run), *sorted(monitor.reasons), *outcome_reasons(replay.run, result)]
+    unranked = [*replay_unranked_reasons(replay), *sorted(monitor.reasons), *outcome_reasons(replay.run, result)]
     payload = {
         "schema_version": _REPLAY_VERIFY_SCHEMA_VERSION,
         "status": status,

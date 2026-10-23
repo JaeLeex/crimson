@@ -87,7 +87,9 @@ readiness, nonnegative quest life bonuses, single rocket death handling, DoT
 death boundaries, impact-aligned corpse slides with corrected impulses, and complete
 Gauss Shotgun/Multi-Plasma Fire Bullets volleys at normal multi-pellet cooldowns.
 Both rules 1 and 2 are playable and verifiable using explicit simulation profiles;
-new runs default to rules 2. `preserve_bugs` selects original behavior, not the
+new runs default to rules 2. Rules 3 is the [minds profile](../rewrite/minds.md): rules-2 gameplay plus
+`creature_steer` commands; it is written only by `crimson minds run`, plays and verifies in the Python port,
+and never ranks. `preserve_bugs` selects original behavior, not the
 previous fixed default. Existing payloads, signatures and results remain intact.
 
 Historical profile selection, identity stability and the reload exception are
@@ -183,9 +185,11 @@ A tick is a two-element **array** `[inputs, commands]`:
 | `typo_char` | `player_index`, `ch` (one character) | Typ-o only |
 | `typo_backspace` | `player_index` | Typ-o only |
 | `typo_submit` | `player_index` | Typ-o only |
+| `creature_steer` | `creature_index` 0..383, `mind_id` 0..65535, `target_x`, `target_y` (canonical f32, 0..1024), `hold_ticks` 1..600 | rules 3 only, not in Typ-o; the slot must hold a live creature, once per tick ([minds](../rewrite/minds.md)) |
 
 `player_index` must be below `player_count`. Command rules are checked
-against the state left by the commands before them.
+against the state left by the commands before them. A `creature_steer` names a creature, not a player: it
+replaces the target the creature's native AI chose this tick and holds for `hold_ticks` ticks.
 
 Every tick advances the simulation by `float32(1/60)` seconds in the native
 1024×1024 arena. Perk picks apply at the start of the tick, before frame

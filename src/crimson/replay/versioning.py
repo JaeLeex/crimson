@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import warnings
 
-from ..game_version import REPLAY_RULES, current_replay_game_version
+from ..game_version import MINDS_RULES, REPLAY_RULES, current_replay_game_version
 from .codec import ReplayCodecError
 from .types import Replay
 
@@ -15,8 +15,10 @@ class ReplayRulesError(ReplayCodecError):
 def require_playable_rules(replay: Replay) -> None:
     """Accept the supported historical and current simulation profiles."""
 
-    if replay.rules not in (1, REPLAY_RULES):
-        raise ReplayRulesError(f"replay was recorded under rules {replay.rules}; this build plays rules 1 and {REPLAY_RULES}")
+    if replay.rules not in (1, REPLAY_RULES, MINDS_RULES):
+        raise ReplayRulesError(
+            f"replay was recorded under rules {replay.rules}; this build plays rules 1, {REPLAY_RULES} and {MINDS_RULES}",
+        )
 
 
 class ReplayGameVersionWarning(UserWarning):

@@ -6,6 +6,7 @@ See: `docs/creatures/update.md`.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 import msgspec
@@ -44,9 +45,10 @@ from ..player_damage import player_take_damage
 from ..projectiles.runtime import projectile_spawn
 from ..projectiles.types import ProjectileTemplateId
 from ..rng_caller_static import RngCallerStatic
+from ..sim.commands import CreatureSteerCommand
 from ..sim.state_types import TERRAIN_SIZE, PlayerState
 from ..sim.timing import ftol_ms_i32
-from .ai import creature_ai7_tick_link_timer, creature_ai_update_target
+from .ai import creature_ai7_tick_link_timer, creature_ai_update_target, creature_apply_steer
 from .anim import CREATURE_ANIM, creature_anim_advance_phase
 from .damage import creature_apply_damage
 from .damage_types import CreatureDamageType
@@ -633,10 +635,11 @@ class CreaturePool:
                 violence_disabled=int(violence_disabled),
             )
 
-    def update(self, step_runtime: WorldStepRuntime) -> None:
+    def update(self, step_runtime: WorldStepRuntime, *, steers: Mapping[int, CreatureSteerCommand] | None = None) -> None:
         """Port of `creature_update_all` for one frame of the step runtime.
 
-        Death side effects are initiated by damage call sites.
+        Death side effects are initiated by damage call sites. `steers` (the minds rules profile) replaces
+        the listed creatures' targets after their native AI step; nothing else in the frame changes.
         """
         dt = f32(step_runtime.dt)
         world = step_runtime.world
@@ -788,6 +791,9 @@ class CreaturePool:
                 creatures=self._entries,
                 dt=dt,
             )
+            steer = None if steers is None else steers.get(idx)
+            if steer is not None:
+                creature_apply_steer(creature, target_x=steer.target_x, target_y=steer.target_y)
             move_scale = float(ai.move_scale)
             if ai.link_death_damage is not None and ai.link_death_damage > 0.0:
                 # Native link-death cleanup calls creature_apply_damage(idx,

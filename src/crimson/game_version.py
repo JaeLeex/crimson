@@ -11,6 +11,9 @@ REPLAY_FORMAT_VERSION = 34
 # Raised whenever a change makes earlier replays play differently. Content fingerprints
 # identify builds; only rules decide compatibility (docs/formats/replay.md).
 REPLAY_RULES = 2
+# The minds profile: rules-2 gameplay plus `creature_steer` commands, which let recorded external
+# controllers (an LLM, a bot) set creatures' targets. Steered runs never rank (docs/formats/replay.md).
+MINDS_RULES = 3
 
 
 @lru_cache(maxsize=1)

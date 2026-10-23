@@ -5,7 +5,7 @@ import msgspec
 from grim.geom import Vec2
 
 from ..game_modes import GameMode
-from ..game_version import REPLAY_RULES
+from ..game_version import MINDS_RULES, REPLAY_RULES
 from ..math_parity import x87_pc24_add
 from ..persistence.save_status import GameStatus
 from ..quests import quest_by_level
@@ -47,7 +47,7 @@ def initialize_run(
     A live caller may supply its save object so gameplay writes remain persistent.
     Playback owns a detached copy of the same pre-start status snapshot.
     """
-    if rules not in (1, 2):
+    if rules not in (1, REPLAY_RULES, MINDS_RULES):
         raise ValueError(f"unsupported replay rules {rules}")
     quest = None
     custom = spec.custom_quest

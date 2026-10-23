@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import msgspec
 
@@ -30,6 +30,7 @@ from ..player_damage import player_take_projectile_damage
 from ..projectiles.types import ProjectileHit
 from ..rng_caller_static import RngCallerStatic
 from ..tutorial.timeline import tutorial_timeline_update
+from .commands import CreatureSteerCommand
 from .input import PlayerInput
 from .mode_updates import (
     ModeState,
@@ -204,8 +205,12 @@ class WorldState(msgspec.Struct):
         mode_state: ModeState = None,
         elapsed_ms: float = 0.0,
         open_perk_menu: bool = False,
+        steers: Mapping[int, CreatureSteerCommand] | None = None,
     ) -> WorldEvents:
-        """Advance one frame; the caller has already applied the perk dt steps."""
+        """Advance one frame; the caller has already applied the perk dt steps.
+
+        `steers` (the minds rules profile) replaces the listed creatures' AI targets this frame.
+        """
         dt = float(dt)
         fx_queue.violence_disabled = self.state.violence_disabled
         frame_dt_ms = ftol_ms_i32(dt)
@@ -221,7 +226,7 @@ class WorldState(msgspec.Struct):
             deaths=[],
             sfx=[],
         )
-        self.creatures.update(step_runtime)
+        self.creatures.update(step_runtime, steers=steers)
         hits, secondary_hit_count = self.projectile_update(step_runtime)
         reload_key_down_any = any(bool(entry.reload_down) or bool(entry.reload_pressed) for entry in inputs)
         player_dt = float(dt)

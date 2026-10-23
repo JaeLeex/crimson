@@ -34,6 +34,7 @@ __all__ = [
     "CreatureAIUpdate",
     "creature_ai7_tick_link_timer",
     "creature_ai_update_target",
+    "creature_apply_steer",
 ]
 
 _FLAG_STOP_AND_GO = int(CreatureFlags.STOP_AND_GO)
@@ -238,3 +239,17 @@ def creature_ai_update_target(
     dy = f32(float(creature.target.y) - float(creature.pos.y))
     creature.target_heading = heading_from_delta_f32(dx=float(dx), dy=float(dy))
     return CreatureAIUpdate(move_scale=f32(move_scale), link_death_damage=link_death_damage)
+
+
+def creature_apply_steer(creature: CreatureState, *, target_x: float, target_y: float) -> None:
+    """Replace the target `creature_ai_update_target` just chose with a mind's (`CreatureSteerCommand`).
+
+    Runs after the native AI step, so `ai_mode` resets, `move_scale` and link-death damage are the
+    native ones; only the point the creature turns toward changes. The heading is derived the way
+    the native tail does it: f32 deltas into atan2.
+    """
+
+    creature.target = Vec2(f32(target_x), f32(target_y))
+    dx = f32(float(creature.target.x) - float(creature.pos.x))
+    dy = f32(float(creature.target.y) - float(creature.pos.y))
+    creature.target_heading = heading_from_delta_f32(dx=float(dx), dy=float(dy))
