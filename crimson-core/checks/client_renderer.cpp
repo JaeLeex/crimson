@@ -420,7 +420,35 @@ void check_rtx() {
   terrain();
   Pixel cleared = ground({}, 0, 200, 200);
   assert(fabsf(cleared.g - bare.g) < 1e-3f);
+  // Monster Vision: an aura adds its warm light to the ground within its 60
+  // units, and nothing past them.
+  const float aura[3] = {700, 300, 1};
+  memcpy(memory + 33500, aura, sizeof aura);
+  w2c_host_perk_light(nullptr, 33500, 1);
+  Pixel warm = ground({}, 0, 700, 300), outside = ground({}, 0, 700, 380);
+  w2c_host_perk_light(nullptr, 33500, 0);
+  assert(warm.r > bare.r + 0.05f && warm.r > warm.b + 0.05f);
+  assert(fabsf(outside.r - ground({}, 0, 700, 380).r) < 1e-3f);
   w2c_host_texture_release(nullptr, 400);
+  // Monster Vision's aura: the analytic glow over the quad's [0, 1] UVs, full
+  // at its center and gone at its edge.
+  auto aura_quad = [](int x, int y) {
+    w2c_host_clear(nullptr, 0xff000000);
+    w2c_host_render_pass(nullptr, HOST_PASS_WORLD_BEGIN);
+    w2c_host_render_state(nullptr, RS_ALPHABLENDENABLE, 1);
+    w2c_host_render_state(nullptr, RS_SRCBLEND, 5);
+    w2c_host_render_state(nullptr, RS_DESTBLEND, 6);
+    w2c_host_render_pass(nullptr, HOST_PASS_AURA);
+    rectangle(400, 300, 490, 390, 0xffffff00);
+    w2c_host_render_pass(nullptr, HOST_PASS_SPRITES);
+    w2c_host_render_state(nullptr, RS_SRCBLEND, 2);
+    w2c_host_render_state(nullptr, RS_DESTBLEND, 2);
+    w2c_host_render_state(nullptr, RS_ALPHABLENDENABLE, 0);
+    w2c_host_render_pass(nullptr, HOST_PASS_WORLD_END);
+    return back_pixel(x, y);
+  };
+  Pixel glow = aura_quad(445, 345), rim = aura_quad(401, 345);
+  assert(glow.r > 0.9f && glow.g > 0.9f && glow.b < 0.01f && rim.r < 0.01f);
   // Fluid smoke: a splat stepped once draws as a translucent gray cloud over a
   // black world, brighter under a light above it; a reset clears it.
   auto smoke = [](std::initializer_list<float> commands, int lights) {
@@ -466,7 +494,7 @@ void check_rtx() {
   w2c_host_render_state(nullptr, RS_ALPHABLENDENABLE, 0);
   w2c_host_texture_stage_state(nullptr, 0, TSS_COLOROP, 4);
 #endif
-  puts("renderer: RTX world tonemaps highlights toward the EDR headroom, beams sum their stamps, lit batches light, bodies shade them, bonus shells mirror lights, blood soaks and brass mirrors the ground, smoke scatters; classic stays 8-bit");
+  puts("renderer: RTX world tonemaps highlights toward the EDR headroom, beams sum their stamps, lit batches light, bodies shade them, bonus shells mirror lights, blood soaks and brass mirrors the ground, smoke scatters, Monster Vision glows; classic stays 8-bit");
 }
 
 int main() {

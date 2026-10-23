@@ -169,6 +169,8 @@ Program smoke_solver{&WGSL_SMOKE_RECT_VERT, &WGSL_SMOKE_SOLVER_FRAG, NO_VERTICES
 Program smoke_splat{&WGSL_SMOKE_RECT_VERT, &WGSL_SMOKE_SPLAT_FRAG, NO_VERTICES};
 Program smoke_impulse{&WGSL_SMOKE_RECT_VERT, &WGSL_SMOKE_IMPULSE_FRAG, NO_VERTICES};
 Program smoke_display{&WGSL_SMOKE_FIELD_VERT, &WGSL_SMOKE_FRAG, NO_VERTICES};
+Program aura_lit{&WGSL_CREATURE_VERT, &WGSL_PERK_AURA_FRAG, DEVICE_VERTICES};
+Program monster_vision{&WGSL_MONSTER_VISION_VERT, &WGSL_MONSTER_VISION_FRAG, DEVICE_VERTICES};
 
 // RTX lighting, as in renderer.cpp: the world's lights and camera, the batch
 // being drawn, a bonus draw's own material, and each artwork's texels in the
@@ -461,7 +463,12 @@ WGPUBindGroup fragment_group(Program &p, std::initializer_list<Input> inputs) {
 }
 
 // Bind a program's groups with its uniform blocks, written to the stream.
+// A stage without a uniform block (the aura's fragment) takes no uniforms.
 void bind(Program &p, WGPUBindGroup group, const Uniforms *vertex, const Uniforms *fragment) {
+  if (!p.frag->uniform_size)
+    fragment = nullptr;
+  if (!p.vert->uniform_size)
+    vertex = nullptr;
   uint32_t offset = fragment ? (uint32_t)put(uniform_stream, fragment->data, p.frag->uniform_size) : 0;
   wgpuRenderPassEncoderSetBindGroup(pass, 0, group, fragment ? 1 : 0, &offset);
   if (vertex) {
@@ -474,7 +481,8 @@ void bind(Program &p, WGPUBindGroup group, const Uniforms *vertex, const Uniform
 void forget_groups() {
   for (Program *p : {&classic, &present_program, &blit, &tonemap, &beam, &creature_lit, &player_lit, &bonus_lit,
                      &ground_lit, &ground_stamp, &ground_fill,
-                     &smoke_solver, &smoke_splat, &smoke_impulse, &smoke_display}) {
+                     &smoke_solver, &smoke_splat, &smoke_impulse, &smoke_display,
+                     &aura_lit, &monster_vision}) {
     for (auto &[key, group] : p->groups)
       wgpuBindGroupRelease(group);
     p->groups.clear();
@@ -651,7 +659,8 @@ void wgpu_renderer_init() {
   stream_buffer(uniform_stream, WGPUBufferUsage_Uniform);
   for (Program *p : {&classic, &present_program, &blit, &tonemap, &beam, &creature_lit, &player_lit, &bonus_lit,
                      &ground_lit, &ground_stamp, &ground_fill,
-                     &smoke_solver, &smoke_splat, &smoke_impulse, &smoke_display})
+                     &smoke_solver, &smoke_splat, &smoke_impulse, &smoke_display,
+                     &aura_lit, &monster_vision})
     create(*p);
   const unsigned char white[4] = {255, 255, 255, 255};
   blank = small_texture(1, white, blank_view);
@@ -888,6 +897,66 @@ void stamp_ground(Ground &g, int kind, const Geometry &geometry) {
   }
 }
 
+// Monster Vision's ground light (host_perk_light), as in renderer.cpp.
+enum { MONSTER_VISION_RADIUS = 60 };
+std::vector<float> perk_sources;
+Target perk_target;
+struct HostVertex {
+  float x, y, z, rhw;
+  u32 color;
+  float u, v;
+};
+
+void accumulate_monster_vision(Ground &g, const Target &t) {
+  std::vector<HostVertex> quads;
+  float lo_x = -scene_camera[0], lo_y = -scene_camera[1];
+  float hi_x = lo_x + t.logical_width, hi_y = lo_y + t.logical_height;
+  for (size_t i = 0; i + 2 < perk_sources.size(); i += 3) {
+    float x = perk_sources[i], y = perk_sources[i + 1], r = MONSTER_VISION_RADIUS;
+    float x0 = std::max(lo_x, x - r), y0 = std::max(lo_y, y - r), x1 = std::min(hi_x, x + r), y1 = std::min(hi_y, y + r);
+    if (x1 <= x0 || y1 <= y0)
+      continue;
+    u32 color = (u32)(perk_sources[i + 2] * 255 + 0.5f) << 24 | 0xffffff;
+    auto corner = [&](float cx, float cy) {
+      return HostVertex{cx + scene_camera[0], cy + scene_camera[1], 0, 1, color, x, y};
+    };
+    for (HostVertex v : {corner(x0, y0), corner(x0, y1), corner(x1, y1), corner(x0, y0), corner(x1, y1), corner(x1, y0)})
+      quads.push_back(v);
+  }
+  if (perk_target.width != t.width || perk_target.height != t.height) {
+    release(perk_target);
+    perk_target.width = t.width, perk_target.height = t.height;
+    perk_target.flags = TARGET_RENDER | TARGET_FLOAT;
+    allocate(perk_target);
+  }
+  perk_target.logical_width = t.logical_width, perk_target.logical_height = t.logical_height;
+  uint64_t bytes = quads.size() * sizeof(HostVertex);
+  if (!fits(vertex_stream, bytes) || !fits(uniform_stream, 8192))
+    submit();
+  WGPUColor none = {0, 0, 0, 0};
+  begin_pass(perk_target, &none);
+  if (quads.empty())
+    return;
+  Output o;
+  o.format = format_of(perk_target);
+  o.topology = WGPUPrimitiveTopology_TriangleList;
+  o.blend = true, o.src = o.dst = WGPUBlendFactor_One;
+  Uniforms vertex(*monster_vision.vert), fragment(*monster_vision.frag);
+  vertex.v2("target_size", (float)t.logical_width, (float)t.logical_height).v2("camera", scene_camera[0], scene_camera[1]);
+  vertex.set("u_ground_size", ground_size, 8);
+  fragment.set("u_ground_size", ground_size, 8).f("u_time_s", scene_seconds - g.epoch).i("u_perk_component", 0);
+  wgpuRenderPassEncoderSetPipeline(pass, pipeline(monster_vision, o));
+  bind(monster_vision,
+       fragment_group(monster_vision, {{"u_substrate_tex", g.substrate.view, linear_clamp()},
+                                       {"u_surface_tex", g.surface.view, linear_clamp()},
+                                       {"u_material_tex", g.coverage.view, linear_clamp()},
+                                       {"u_occlusion_tex", blank_view, nearest_clamp()}}),
+       &vertex, &fragment);
+  uint64_t at = put(vertex_stream, quads.data(), bytes);
+  wgpuRenderPassEncoderSetVertexBuffer(pass, 0, vertex_stream.buffer, at, bytes);
+  wgpuRenderPassEncoderDraw(pass, (uint32_t)quads.size(), 1, 0, 0);
+}
+
 // The terrain drawn into the world, lit as the Python port's ground.
 bool ground_draw(const Geometry &geometry) {
   auto it = textures.find(bound[0]);
@@ -895,11 +964,15 @@ bool ground_draw(const Geometry &geometry) {
     return false;
   Ground &g = ground_of(bound[0]);
   Target &t = drawing_target(current_target);
+  bool perk = !perk_sources.empty();
+  if (perk)
+    accumulate_monster_vision(g, t);
   pass_into(t);
   Uniforms vertex(*ground_lit.vert), fragment(*ground_lit.frag);
   vertex.v2("target_size", (float)t.logical_width, (float)t.logical_height).v2("camera", scene_camera[0], scene_camera[1]);
   fragment.set("u_ground_size", ground_size, 8).f("u_time_s", scene_seconds - g.epoch).i("u_debug", 0);
-  fragment.i("u_debug_display", 1).i("u_has_perk", 0).i("u_dynamic_shadows", dynamic_shadows);
+  fragment.i("u_debug_display", 1).i("u_has_perk", perk).i("u_dynamic_shadows", dynamic_shadows);
+  fragment.v4("u_perk_view", -scene_camera[0], -scene_camera[1], (float)t.logical_width, (float)t.logical_height);
   fragment.i("u_spec_light_count", light_count).i("u_has_beam_lights", beam_lights).set("u_beam_tuning", beam_tuning, 16);
   fragment.set("u_occlusion_grid", occlusion_grid, 16).f("u_occlusion_cell_size", occlusion_cell);
   fragment.set("u_spec_pos", light_pos, light_count * 16).set("u_spec_color", light_rgb, light_count * 16);
@@ -912,7 +985,7 @@ bool ground_draw(const Geometry &geometry) {
        fragment_group(ground_lit, {{"u_substrate_tex", g.substrate.view, linear_clamp()},
                                    {"u_surface_tex", g.surface.view, linear_clamp()},
                                    {"u_material_tex", g.coverage.view, linear_clamp()},
-                                   {"u_perk_tex", blank_view, linear_clamp()},
+                                   {"u_perk_tex", perk ? perk_target.view : blank_view, linear_clamp()},
                                    {"u_occlusion_tex", occlusion_grid[2] ? occlusion_view : blank_view, nearest_clamp()}}),
        &vertex, &fragment);
   draw_geometry(geometry);
@@ -970,6 +1043,7 @@ bool wgpu_renderer_set_rtx(bool enabled) {
   while (!grounds.empty())
     drop_ground(grounds.begin()->first);
   release_smoke();
+  release(perk_target);
   // Classic keeps an 8-bit back buffer: its draws saturate at white one by one.
   Target &back = textures[0];
   int flags = enabled ? back.flags | TARGET_HALF_FLOAT : back.flags & ~TARGET_HALF_FLOAT;
@@ -1162,6 +1236,7 @@ void wgpu_w2c_host_draw(struct w2c_host *, u32 primitive, u32 vertices, u32 vert
   Program &program = !lit                           ? classic
                      : material == HOST_PASS_PLAYERS ? player_lit
                      : material == MATERIAL_BONUS    ? bonus_lit
+                     : material == HOST_PASS_AURA    ? aura_lit
                                                      : creature_lit;
   if (lit) {
     Uniforms vertex(*program.vert), fragment(*program.frag);
@@ -1240,6 +1315,10 @@ void wgpu_w2c_host_scene(struct w2c_host *, u32 view, u32 lights, u32 count) {
     memcpy(line_cells + i * 12, l + 20, 48);
     beam_lights |= l[20] > 0;
   }
+}
+void wgpu_w2c_host_perk_light(struct w2c_host *, u32 sources, u32 count) {
+  const float *s = (const float *)(client_memory() + sources);
+  perk_sources.assign(s, s + count * 3);
 }
 void wgpu_w2c_host_ground(struct w2c_host *, u32 kind, f32 seconds) {
   ground_kind = (int)kind;

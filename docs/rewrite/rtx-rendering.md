@@ -246,9 +246,11 @@ Creature bodies and players are lit as in the Python port, with the same
 the frame's lights at the world's start (`crimson-core/game/rtx_lights.cpp`, a
 port of `material_lights.py`): projectiles and their ion arcs, muzzle flashes,
 the Sharpshooter sight, the Radioactive aura, rocket exhaust, detonations and
-grouped flame particles, with the same per-response selection. Explosion
-fireballs and shells, which the Python port records as each explosion spawns,
-are not collected yet. The module marks the creature body and player batches
+grouped flame particles, and explosion fireballs and shells, with the same
+per-response selection. Like `ExplosionVisual`, the module records each explosion
+burst as it spawns: its fireball sprites as they start out, and whether its ring
+spawned. Rocket hits stay dark, their detonation lighting them instead. The
+records age with the effects' update and are kept apart from the run. The module marks the creature body and player batches
 (`HOST_PASS_CREATURES`, `HOST_PASS_PLAYERS`), and the host draws them with the
 lit programs, the camera offset giving each fragment its world position.
 Creature bodies keep the 0.60 ambient fill even without lights; players keep
@@ -284,8 +286,13 @@ Blood baked before then (in classic, or before the terrain copy a seek starts
 from) stays in the substrate as painted terrain, without its wet film. A seek
 bakes the logged decals after that copy again at their logged clock. WebGPU
 keeps the surface in 32-bit floats where the device filters and blends them,
-otherwise in half floats. Monster Vision's ground light and the perk auras are
-not ported yet.
+otherwise in half floats.
+Monster Vision draws as in the Python port. Its aura quad (`HOST_PASS_AURA`,
+drawn over [0, 1] UVs) takes the analytic glow of `perk_aura.frag`. The module
+sends each aura whose support meets the view, with its fade (`host_perk_light`).
+Before the ground draws, the host sums their shadowless light into a float
+accumulator with the ground shader's `MONSTER_VISION_PASS`, which the ground
+program then adds.
 
 Fluid smoke takes the same solver and display shaders (`smoke_solver.frag`,
 `smoke_splat.frag`, `smoke_impulse.frag`, `smoke.frag`). The module captures what
