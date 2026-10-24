@@ -14,7 +14,7 @@ from .driver import BoundMind, MindsRun, MindsRunConfig, run_minds
 from .ledger import Account, Ledger, Receipt
 from .llm import Exchange, LlmMind
 from .minds import Decision, FlankMind, IdleMind, Mind, RandomMind, Steer, SurroundMind
-from .observe import CreatureView, Observation, observe
+from .observe import CreatureView, GroupView, Observation, observe
 
 __all__ = [
     "Account",
@@ -23,6 +23,7 @@ __all__ = [
     "Decision",
     "Exchange",
     "FlankMind",
+    "GroupView",
     "IdleMind",
     "Ledger",
     "LlmMind",

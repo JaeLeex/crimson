@@ -48,7 +48,8 @@ uv run crimson minds run --mind llm --url http://127.0.0.1:8081 --model qwen2.5-
 uv run crimson minds run --mind random --ungoverned
 uv run crimson minds verify <dir>/run.crd
 uv run crimson minds compare --mind flank --scene ring --seeds 5
-uv run crimson minds pair scripted-7/run.crd ungoverned-7/run.crd --left-label "native AI" --right-label "flank minds" --out pair.mp4
+uv run crimson minds stochastic --mind llm --url http://127.0.0.1:8083 --reps 5 --seed 7
+uv run crimson minds grid native/run.crd flank/run.crd surround/run.crd llm/run.crd --labels "native AI,flank,surround,Qwen 7B" --out grid.mp4
 ```
 
 `run` plays a scene headlessly with an aim-bot pilot (`crimson.minds.pilot`), asks the minds every
@@ -57,8 +58,10 @@ and writes `run.crd`, `receipts.jsonl`, `run.minds.json` and, for a model, one `
 mind (prompt, reply, tokens, steers). `--mind idle` is the scripted baseline: no steers, the native AI.
 `--ungoverned` meters the same things and refuses nothing the simulation would accept. `compare` plays the
 scripted, ungoverned and governed conditions over the same seeds and prints one table (outcome, health,
-damage, kills, steers, inferences, tokens, credits, refusals, verification). `pair` renders two replays side
-by side with labels, through `crimson replay render` and ffmpeg.
+damage, kills, steers, inferences, tokens, credits, refusals, verification). `stochastic` plays **one** seed
+many times with the same pilot and reports the spread and how many distinct recordings came out: the
+stochastic-game test (below). `grid` renders two or four replays as one labelled video (side by side or 2×2)
+through `crimson replay render`, Pillow for the labels and ffmpeg.
 
 ### Scenes
 
@@ -81,9 +84,21 @@ differs.
 `crimson.minds.tactics` is a six-word vocabulary a mind can speak instead of inventing coordinates:
 `flank_left`, `flank_right` (circle to that side of the player's aim, then close in), `behind`, `rush`,
 `hold`, `spread` (step out of the line of fire). Each resolves to a point relative to the player and the
-direction they aim. The `llm` mind asks for one move per creature by default (`--llm-mode moves`); `coords`
-asks for arena points instead. The `flank` heuristic deals each creature a side once and keeps it; `surround`
-puts each creature on an evenly spaced slot of a ring and, once enough are in place, rushes with all of them.
+direction they aim. The `llm` mind speaks it by default (`--llm-mode moves`): it sees its creatures as
+**groups** (an eighth of the circle round the player, near or far; `Observation.groups`) and answers with a
+default move plus exceptions per group, which keeps a reply to a few dozen tokens whatever the horde's size. It
+never gets `hold`: a monster that stands still is a free kill, and small models reach for it. `coords` asks for
+arena points instead. The `flank` heuristic deals each creature a side once and keeps it; `surround` puts each
+creature on an evenly spaced slot of a ring and, once enough are in place, rushes with all of them.
+
+### The stochastic-game test
+
+The simulation is deterministic and a recording replays bit for bit, so where does a different game come
+from? From the minds. `crimson minds stochastic` plays one run seed, one pilot, N times; a sampling mind (a model
+at temperature, a heuristic on a fresh seed each time) makes N different games, each of which verifies. With
+`--llm-seed` fixed and temperature 0 the model server is deterministic on the same build, and N recordings
+come out identical: the test that the variation is the mind's and nothing else's. With the flank heuristic on
+the ring, seed 7, ten games: ten distinct recordings, the pilot dead in six, alive between 23 and 60 s.
 
 ### What it shows
 

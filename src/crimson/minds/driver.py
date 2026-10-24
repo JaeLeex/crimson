@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import msgspec
@@ -22,7 +23,7 @@ from ..sim.state_types import TERRAIN_SIZE
 from .ledger import Account, Ledger, Receipt
 from .llm import Exchange, LlmMind
 from .minds import Mind
-from .observe import creature_is_live, observe
+from .observe import Observation, creature_is_live, observe
 from .pilot import AimBot, PilotSkill
 
 
@@ -59,6 +60,8 @@ class MindsRunConfig:
     scene: str = "arena"
     pilot: PilotSkill = field(default_factory=PilotSkill)
     perk_choice: int = 0
+    # Ask the minds concurrently (a model server with several slots answers them together).
+    parallel: bool = True
 
     def run_spec(self) -> RunSpec:
         match self.scene:
@@ -176,6 +179,7 @@ def run_minds(
 
         if tick % config.cadence == 0:
             live_indices = [index for index, creature in enumerate(entries) if creature_is_live(creature)]
+            asks: list[tuple[int, BoundMind, Observation]] = []
             for mind_id, bound in enumerate(minds):
                 owned = [index for index in live_indices if owner_of(index, mind_count) == mind_id]
                 if not owned or not ledger.may_infer(mind_id, tick):
@@ -183,9 +187,16 @@ def run_minds(
                 observation = observe(
                     world, tick=tick, elapsed_ms=session.elapsed_ms, owned=owned, others_limit=config.others_limit,
                 )
-                asked = time.perf_counter()
-                decision = bound.mind.decide(observation)
-                mind_s += time.perf_counter() - asked
+                asks.append((mind_id, bound, observation))
+            asked = time.perf_counter()
+            if config.parallel and len(asks) > 1:
+                with ThreadPoolExecutor(max_workers=len(asks)) as pool:
+                    decisions = list(pool.map(lambda ask: ask[1].mind.decide(ask[2]), asks))
+            else:
+                decisions = [bound.mind.decide(observation) for _, bound, observation in asks]
+            mind_s += time.perf_counter() - asked
+            # The ledger and the recording follow mind order whatever order the answers arrived in.
+            for (mind_id, _bound, _observation), decision in zip(asks, decisions, strict=True):
                 ledger.charge_inference(
                     mind_id,
                     tick,

@@ -24,6 +24,51 @@ class CreatureView(msgspec.Struct, frozen=True):
     size: float
 
 
+class GroupView(msgspec.Struct, frozen=True):
+    """Owned creatures in one sector round the player at one range: what a mind commands as a unit."""
+
+    id: int
+    count: int
+    x: float
+    y: float
+    hp: float
+    members: tuple[int, ...]
+
+
+SECTORS = 8
+NEAR = 220.0
+
+
+def group_owned(owned: tuple[CreatureView, ...], *, player_x: float, player_y: float) -> tuple[GroupView, ...]:
+    """Owned creatures grouped by the eighth of the circle they occupy round the player and whether they are near.
+
+    Group ids are stable per sector and range (0..15), so a mind can refer to "the group north-east, close".
+    """
+
+    import math
+
+    buckets: dict[int, list[CreatureView]] = {}
+    for creature in owned:
+        angle = math.atan2(creature.y - player_y, creature.x - player_x) % math.tau
+        sector = int(angle / (math.tau / SECTORS)) % SECTORS
+        near = math.hypot(creature.x - player_x, creature.y - player_y) <= NEAR
+        buckets.setdefault(sector * 2 + (0 if near else 1), []).append(creature)
+    groups = []
+    for group_id in sorted(buckets):
+        members = buckets[group_id]
+        groups.append(
+            GroupView(
+                id=group_id,
+                count=len(members),
+                x=sum(c.x for c in members) / len(members),
+                y=sum(c.y for c in members) / len(members),
+                hp=sum(c.hp for c in members) / len(members),
+                members=tuple(c.index for c in members),
+            ),
+        )
+    return tuple(groups)
+
+
 class Observation(msgspec.Struct, frozen=True):
     """One mind's view at one tick: the player, the creatures it owns, and the nearest others."""
 
@@ -39,6 +84,10 @@ class Observation(msgspec.Struct, frozen=True):
     kills: int
     owned: tuple[CreatureView, ...]
     others: tuple[CreatureView, ...]
+
+    @property
+    def groups(self) -> tuple[GroupView, ...]:
+        return group_owned(self.owned, player_x=self.player_x, player_y=self.player_y)
 
 
 def creature_is_live(creature: CreatureState) -> bool:

@@ -155,6 +155,7 @@ def cmd_minds_run(
     timeout_s: float = typer.Option(60.0, "--timeout", help="seconds to wait for a model reply"),
     llm_mode: str = typer.Option("moves", "--llm-mode", help="moves (a tactic per creature) or coords (arena points)"),
     scene: str = typer.Option("arena", "--scene", help="arena (= edge: waves from one edge), ring (waves around the player) or survival"),
+    others: int = typer.Option(12, "--others", help="nearest other creatures shown to a mind"),
     pilot_aim_lag: float = typer.Option(40.0, "--pilot-aim-lag", help="units per tick the pilot's aim may move (0 = snap)"),
     pilot_fire_on: int = typer.Option(20, "--pilot-fire-on", help="ticks the pilot holds fire per burst"),
     pilot_fire_off: int = typer.Option(20, "--pilot-fire-off", help="ticks the pilot rests between bursts"),
@@ -180,7 +181,9 @@ def cmd_minds_run(
         timeout_s=timeout_s,
         llm_mode=llm_mode,
     )
-    config = MindsRunConfig(seed=seed, ticks=ticks, cadence=cadence, hold=hold, governed=governed, scene=scene, pilot=skill)
+    config = MindsRunConfig(
+        seed=seed, ticks=ticks, cadence=cadence, hold=hold, governed=governed, scene=scene, pilot=skill, others_limit=others,
+    )
     condition = "scripted" if mind == "idle" else ("governed" if governed else "ungoverned")
     typer.echo(f"minds run: {condition} scene={scene} mind={mind} x{len(bound)} seed={seed} ticks<={ticks} cadence={cadence}", err=True)
     run = run_minds(bound, config, progress=_progress_printer(600))
@@ -242,6 +245,7 @@ def cmd_minds_compare(
     timeout_s: float = typer.Option(60.0, "--timeout"),
     llm_mode: str = typer.Option("moves", "--llm-mode", help="moves or coords"),
     scene: str = typer.Option("arena", "--scene", help="arena or survival"),
+    others: int = typer.Option(12, "--others", help="nearest other creatures shown to a mind"),
     pilot_aim_lag: float = typer.Option(40.0, "--pilot-aim-lag"),
     pilot_fire_on: int = typer.Option(20, "--pilot-fire-on"),
     pilot_fire_off: int = typer.Option(20, "--pilot-fire-off"),
@@ -283,7 +287,9 @@ def cmd_minds_compare(
             typer.echo(f"  {condition:<10} seed={run_seed} ...", err=True)
             run = run_minds(
                 bound,
-                MindsRunConfig(seed=run_seed, ticks=ticks, cadence=cadence, governed=governed, scene=scene, pilot=skill),
+                MindsRunConfig(
+                    seed=run_seed, ticks=ticks, cadence=cadence, governed=governed, scene=scene, pilot=skill, others_limit=others,
+                ),
             )
             verified, mismatches = _verify(run)
             _write_run(run, out / f"{condition}-{run_seed}", condition=condition, kind=kind, verified=verified, mismatches=mismatches)
@@ -320,20 +326,34 @@ def cmd_minds_compare(
     typer.echo(f"wrote {out / 'compare.json'} and one directory per run ({time.perf_counter() - started:.1f}s)")
 
 
-@minds_app.command("pair")
-def cmd_minds_pair(
-    left: Path = typer.Argument(..., exists=True, dir_okay=False, help="left replay (.crd), e.g. the ungoverned run"),
-    right: Path = typer.Argument(..., exists=True, dir_okay=False, help="right replay (.crd), e.g. the governed run"),
+def _label_png(text: str, path: Path, *, width: int) -> None:
+    """A translucent label strip as a PNG, for ffmpeg builds without the drawtext filter."""
+
+    from PIL import Image, ImageDraw, ImageFont
+
+    height = 44
+    image = Image.new("RGBA", (width, height), (0, 0, 0, 150))
+    draw = ImageDraw.Draw(image)
+    font: ImageFont.ImageFont | ImageFont.FreeTypeFont
+    try:
+        font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Bold.ttf", 26)
+    except OSError:
+        font = ImageFont.load_default()
+    draw.text((14, 9), text, fill=(255, 255, 255, 255), font=font)
+    image.save(path)
+
+
+@minds_app.command("grid")
+def cmd_minds_grid(
+    replays: list[Path] = typer.Argument(..., help="two or four replays (.crd): left/right, or a 2x2 grid in reading order"),
     out: Path = typer.Option(..., "--out", help="output .mp4"),
-    left_label: str = typer.Option("ungoverned", "--left-label"),
-    right_label: str = typer.Option("governed", "--right-label"),
-    width: int = typer.Option(768, "--width", help="render width per side"),
-    height: int = typer.Option(768, "--height", help="render height"),
+    labels: str = typer.Option("", "--labels", help="comma-separated labels, one per replay (default: the run's minds.json condition and mind)"),
+    size: int = typer.Option(640, "--size", help="render size per tile (square)"),
     max_ticks: int | None = typer.Option(None, "--max-ticks"),
     assets_dir: Path = typer.Option(Path("artifacts/assets"), "--assets-dir", help="assets root holding the .paq files"),
     base_dir: Path = _BASE_DIR,
 ) -> None:
-    """Render two replays and put them side by side in one video, labelled, with ffmpeg."""
+    """Render two or four replays as one labelled video: side by side, or a 2x2 grid, through ffmpeg."""
     import shutil
     import subprocess
     import tempfile
@@ -341,24 +361,39 @@ def cmd_minds_pair(
     from ..replay.codec import load_replay_file
     from ..replay.driver.replay_render import ReplayRenderError, run_replay_render_video
 
+    if len(replays) not in (2, 4):
+        typer.echo("give two or four replays", err=True)
+        raise typer.Exit(code=2)
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
         typer.echo("ffmpeg not found on PATH", err=True)
         raise typer.Exit(code=1)
-    with tempfile.TemporaryDirectory(prefix="crimson-minds-pair-") as tmp:
-        sides: list[Path] = []
-        for index, (path, label) in enumerate(((left, left_label), (right, right_label))):
-            side = Path(tmp) / f"side-{index}.mp4"
-            typer.echo(f"rendering {label}: {path}", err=True)
+    names = [part.strip() for part in labels.split(",")] if labels else []
+    if names and len(names) != len(replays):
+        typer.echo("one label per replay", err=True)
+        raise typer.Exit(code=2)
+    if not names:
+        for path in replays:
+            meta = path.with_name("run.minds.json")
+            if meta.is_file():
+                data = json.loads(meta.read_text(encoding="utf-8"))
+                names.append(f"{data.get('condition', '')} {data.get('mind', '')}".strip())
+            else:
+                names.append(path.stem)
+    with tempfile.TemporaryDirectory(prefix="crimson-minds-grid-") as tmp:
+        tiles: list[Path] = []
+        for index, path in enumerate(replays):
+            tile = Path(tmp) / f"tile-{index}.mp4"
+            typer.echo(f"rendering {names[index]}: {path}", err=True)
             try:
                 run_replay_render_video(
                     load_replay_file(path),
                     replay_path=path,
-                    output_path=side,
+                    output_path=tile,
                     base_dir=base_dir,
                     assets_dir=assets_dir,
-                    width=width,
-                    height=height,
+                    width=size,
+                    height=size,
                     max_ticks=max_ticks,
                     preset="veryfast",
                     overwrite=True,
@@ -366,26 +401,147 @@ def cmd_minds_pair(
             except ReplayRenderError as exc:
                 typer.echo(f"render failed: {exc}", err=True)
                 raise typer.Exit(code=1) from exc
-            sides.append(side)
-        labelled = (
-            f"[0:v]drawtext=text='{left_label}':x=16:y=16:fontsize=28:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=8[l];"
-            f"[1:v]drawtext=text='{right_label}':x=16:y=16:fontsize=28:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=8[r];"
-            "[l][r]hstack=inputs=2:shortest=1[v]"
-        )
-        plain = "[0:v][1:v]hstack=inputs=2:shortest=1[v]"
+            label = Path(tmp) / f"label-{index}.png"
+            _label_png(names[index], label, width=size)
+            tiles.append(tile)
+        inputs: list[str] = []
+        for index, tile in enumerate(tiles):
+            inputs += ["-i", str(tile), "-i", str(Path(tmp) / f"label-{index}.png")]
+        graph = "".join(f"[{2 * index}:v][{2 * index + 1}:v]overlay=0:0[t{index}];" for index in range(len(tiles)))
+        if len(tiles) == 2:
+            graph += "[t0][t1]hstack=inputs=2:shortest=1[v]"
+        else:
+            graph += "[t0][t1][t2][t3]xstack=inputs=4:layout=0_0|w0_0|0_h0|w0_h0:shortest=1[v]"
         out.parent.mkdir(parents=True, exist_ok=True)
-
-        def stack(graph: str) -> subprocess.CompletedProcess[str]:
-            command = [ffmpeg, "-y", "-loglevel", "error", "-i", str(sides[0]), "-i", str(sides[1]), "-filter_complex", graph]
-            command += ["-map", "[v]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", str(out)]
-            return subprocess.run(command, check=False, capture_output=True, text=True)
-
-        completed = stack(labelled)
-        unlabelled = completed.returncode != 0 and "drawtext" in completed.stderr
-        if unlabelled:
-            typer.echo("this ffmpeg has no drawtext filter; stacking without labels", err=True)
-            completed = stack(plain)
+        command = [ffmpeg, "-y", "-loglevel", "error", *inputs, "-filter_complex", graph, "-map", "[v]"]
+        command += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", str(out)]
+        completed = subprocess.run(command, check=False, capture_output=True, text=True)
         if completed.returncode != 0:
             typer.echo(f"ffmpeg failed: {completed.stderr.strip()}", err=True)
             raise typer.Exit(code=1)
-    typer.echo(f"wrote {out}" + (" (unlabelled)" if unlabelled else ""))
+    typer.echo(f"wrote {out}")
+
+
+def _spread(values: list[float]) -> dict[str, float]:
+    import statistics
+
+    return {"min": round(min(values), 1), "mean": round(statistics.mean(values), 1), "max": round(max(values), 1)}
+
+
+@minds_app.command("stochastic")
+def cmd_minds_stochastic(
+    mind: str = typer.Option("llm", "--mind", help="random, flank, surround or llm"),
+    reps: int = typer.Option(5, "--reps", help="how many times to play the same seed"),
+    minds: int = typer.Option(2, "--minds"),
+    seed: int = typer.Option(7, "--seed", help="the one run seed every repetition plays"),
+    ticks: int = typer.Option(2400, "--ticks"),
+    cadence: int = typer.Option(30, "--cadence"),
+    scene: str = typer.Option("ring", "--scene"),
+    others: int = typer.Option(6, "--others", help="nearest other creatures shown to a mind"),
+    ungoverned: bool = typer.Option(True, "--ungoverned/--governed"),
+    budget: int = typer.Option(120, "--budget", help="credits per mind when governed"),
+    price: int = typer.Option(10, "--price"),
+    url: str = typer.Option("http://127.0.0.1:8083", "--url"),
+    model: str = typer.Option("", "--model"),
+    temperature: float = typer.Option(0.9, "--temperature"),
+    llm_seed: int | None = typer.Option(None, "--llm-seed", help="fix the model's sampling seed for every repetition (a determinism check)"),
+    mind_seed_step: int = typer.Option(1, "--mind-seed-step", help="model-free minds: seed offset between repetitions (0 = same seed every time)"),
+    timeout_s: float = typer.Option(180.0, "--timeout"),
+    pilot_aim_lag: float = typer.Option(40.0, "--pilot-aim-lag"),
+    pilot_fire_on: int = typer.Option(20, "--pilot-fire-on"),
+    pilot_fire_off: int = typer.Option(20, "--pilot-fire-off"),
+    out: Path | None = typer.Option(None, "--out"),
+    base_dir: Path = _BASE_DIR,
+) -> None:
+    """Play one seed many times with the same pilot and see how much the games differ, each still verifying.
+
+    This is the stochastic-game test: the simulation is deterministic and the recording replays bit for bit, but
+    a mind that samples (a model at temperature, a heuristic on a fresh seed) makes a different game each time.
+    The table shows the spread; `distinct` counts recordings with different bytes.
+    """
+    import hashlib
+
+    from ..minds.driver import MindsRunConfig, run_minds
+    from ..minds.pilot import PilotSkill
+    from ..replay.codec import encode_replay_payload
+
+    skill = PilotSkill(aim_lag=pilot_aim_lag, fire_on=pilot_fire_on, fire_off=pilot_fire_off)
+    if out is None:
+        out = base_dir / "minds" / f"stochastic-{datetime.now(tz=UTC).strftime('%Y%m%dT%H%M%SZ')}"
+    rows: list[dict[str, object]] = []
+    digests: list[str] = []
+    alive_list: list[float] = []
+    health_list: list[float] = []
+    kills_list: list[float] = []
+    started = time.perf_counter()
+    for rep in range(max(1, int(reps))):
+        bound = _build_minds(
+            mind,
+            count=minds,
+            seed=seed + rep * mind_seed_step,
+            budget=None if ungoverned else budget,
+            price=price,
+            url=url,
+            model=model,
+            temperature=temperature,
+            llm_seed=llm_seed,
+            timeout_s=timeout_s,
+            llm_mode="moves",
+        )
+        typer.echo(f"  rep {rep + 1}/{reps} seed={seed} mind={mind} ...", err=True)
+        config = MindsRunConfig(
+            seed=seed, ticks=ticks, cadence=cadence, governed=not ungoverned, scene=scene, pilot=skill, others_limit=others,
+        )
+        run = run_minds(bound, config)
+        verified, mismatches = _verify(run)
+        digest = hashlib.sha256(encode_replay_payload(run.replay)).hexdigest()
+        digests.append(digest)
+        _write_run(run, out / f"rep-{rep}", condition="ungoverned" if ungoverned else "governed", kind=mind, verified=verified, mismatches=mismatches)
+        accounts = run.accounts
+        alive = run.end_tick if run.end_tick is not None else run.ticks
+        alive_list.append(alive / 60)
+        health_list.append(run.player_health)
+        kills_list.append(float(run.result.kills))
+        rows.append(
+            {
+                "rep": rep,
+                "outcome": str(run.result.outcome),
+                "alive_s": round(alive / 60, 1),
+                "health": round(run.player_health),
+                "kills": run.result.kills,
+                "steers": run.steers_recorded,
+                "inferences": sum(account.inferences for account in accounts),
+                "failed": sum(account.failed_inferences for account in accounts),
+                "tokens": sum(account.tokens for account in accounts),
+                "refused": sum(account.refusals for account in accounts),
+                "verified": verified,
+                "recording": digest[:12],
+                "wall_s": round(run.wall_s, 1),
+            },
+        )
+    out.mkdir(parents=True, exist_ok=True)
+    summary = {
+        "mind": mind,
+        "seed": seed,
+        "reps": len(rows),
+        "temperature": temperature,
+        "llm_seed": llm_seed,
+        "distinct_recordings": len(set(digests)),
+        "all_verified": all(bool(row["verified"]) for row in rows),
+        "alive_s": _spread(alive_list),
+        "health": _spread(health_list),
+        "kills": _spread(kills_list),
+        "deaths": sum(row["outcome"] == "death" for row in rows),
+    }
+    (out / "stochastic.json").write_text(json.dumps({"summary": summary, "rows": rows}, indent=2) + "\n", encoding="utf-8")
+    columns = ("rep", "outcome", "alive_s", "health", "kills", "steers", "inferences", "failed", "tokens", "refused", "verified", "recording", "wall_s")
+    widths = {column: max(len(column), *(len(str(row[column])) for row in rows)) for column in columns}
+    typer.echo("  ".join(column.ljust(widths[column]) for column in columns))
+    for row in rows:
+        typer.echo("  ".join(str(row[column]).ljust(widths[column]) for column in columns))
+    typer.echo(
+        f"{summary['reps']} games of seed {seed}: {summary['distinct_recordings']} distinct recordings, "
+        f"{summary['deaths']} pilot deaths, alive {summary['alive_s']}, health {summary['health']}, kills {summary['kills']}, "
+        f"all verified={summary['all_verified']} ({time.perf_counter() - started:.0f}s)",
+    )
+    typer.echo(f"wrote {out / 'stochastic.json'}")

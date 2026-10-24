@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import pickle
 from collections.abc import Sequence
 
@@ -286,10 +287,12 @@ def test_model_move_replies_are_parsed_and_unknown_moves_dropped() -> None:
     assert [steer.creature_index for steer in steers] == [7]
     assert (steers[0].target_x, steers[0].target_y) == (512.0, 362.0)
     assert parse_moves('{"moves":[{"i":7,"m":"nope"}]}', observation) == ()
+    # The model is never allowed to hold.
+    assert parse_moves('{"default":"hold","moves":[{"i":7,"m":"hold"}]}', observation) == ()
     # A default move covers every owned creature the exceptions leave out.
     observation = msgspec.structs.replace(observation, owned=(_view(7), _view(8)))
-    steers = parse_moves('{"default":"rush","moves":[{"i":8,"m":"hold"}]}', observation)
-    assert [(steer.creature_index, steer.target_x, steer.target_y) for steer in steers] == [(7, 512.0, 512.0), (8, 100.0, 100.0)]
+    steers = parse_moves('{"default":"rush","moves":[{"i":8,"m":"flank_left"}]}', observation)
+    assert [(steer.creature_index, steer.target_x, steer.target_y) for steer in steers] == [(7, 512.0, 512.0), (8, 512.0, 362.0)]
 
 
 def test_the_pilot_skill_dial_changes_the_damage_the_horde_lands() -> None:
@@ -302,3 +305,37 @@ def test_the_pilot_skill_dial_changes_the_damage_the_horde_lands() -> None:
     )
     assert unarmed.damage_taken >= shooting.damage_taken
     assert unarmed.result.kills <= shooting.result.kills
+
+
+def test_the_same_seed_makes_different_games_under_sampling_minds_and_the_same_game_under_the_same_mind_seed() -> None:
+    """The stochastic-game property: the run seed fixes the world and the pilot; the minds' sampling makes the game."""
+
+    config = MindsRunConfig(seed=SEED, ticks=900, governed=False, scene="ring")
+    runs = [run_minds([BoundMind(FlankMind(mind_seed), budget=None), BoundMind(FlankMind(mind_seed + 1), budget=None)], config) for mind_seed in (1, 2, 1)]
+    payloads = [encode_replay_payload(run.replay) for run in runs]
+    assert payloads[0] != payloads[1]
+    assert payloads[0] == payloads[2]
+    assert all(_verified(run.replay) == [] for run in runs)
+
+
+def test_a_group_move_steers_every_member_of_the_group() -> None:
+    from crimson.minds.llm import group_prompt, parse_moves
+
+    observation = msgspec.structs.replace(
+        observe(_survival_session(MINDS_RULES).world, tick=0, elapsed_ms=0.0, owned=()),
+        player_x=512.0,
+        player_y=512.0,
+        player_aim_x=612.0,
+        player_aim_y=512.0,
+        owned=(_view(1), _view(2), msgspec.structs.replace(_view(3), x=900.0, y=512.0)),
+    )
+    groups = observation.groups
+    assert sorted(len(group.members) for group in groups) == [1, 2]
+    east = next(group for group in groups if group.members == (3,))
+    reply = json.dumps({"default": "flank_left", "moves": [{"g": east.id, "m": "rush"}]})
+    steers = {steer.creature_index: (steer.target_x, steer.target_y) for steer in parse_moves(reply, observation)}
+    assert steers[3] == (512.0, 512.0)
+    assert steers[1] == (512.0, 362.0)
+    assert steers[2] == (512.0, 362.0)
+    assert '"groups":[' in group_prompt(observation)
+    assert '"others":0' in group_prompt(observation)

@@ -29,16 +29,19 @@ SYSTEM_PROMPT_COORDS = (
     'Reply with JSON only, no prose: {"steers":[{"i":<owned index>,"x":<0..1024>,"y":<0..1024>}, ...]}.'
 )
 
+# The model never gets `hold`: a monster that stands still is a free kill, and small models reach for it.
+LLM_MOVES = tuple(move for move in MOVES if move != "hold")
+
 SYSTEM_PROMPT_MOVES = (
-    "You command monsters in Crimsonland, a top-down shooter. The player at (player_x, player_y) aims at "
-    "(player_aim_x, player_aim_y) and shoots along that line; it takes a moment to turn. Every few ticks "
-    "(60 ticks = 1 s) you get your monsters under `owned` and the nearest others under `others`, with hp. "
-    "Give each owned monster one move: flank_left or flank_right (circle to that side of the player's aim, then "
-    "close in), behind (get round the back of the aim), rush (straight at the player), hold (stay put), spread "
-    "(step out of the line of fire). Split your monsters across sides so one burst cannot kill several, send "
-    "the healthy ones round and the wounded ones in, and never send everyone down the firing line. "
-    'Reply with JSON only, no prose, and keep it short: {"default":"<move for every owned monster not listed>",'
-    '"moves":[{"i":<owned index>,"m":"<move>"}, ...]} where `moves` lists only the exceptions.'
+    "You command monsters in Crimsonland, a top-down shooter, and you want the player dead. The player at "
+    "(player_x, player_y) aims at (player_aim_x, player_aim_y) and shoots along that line; turning takes a moment. "
+    "Every few ticks (60 ticks = 1 s) you get your monsters as `groups` (g = group id, n = how many, x/y = their "
+    "centre, hp = their average health) and how many other monsters are near (`others`). Moves: flank_left and "
+    "flank_right circle to that side of the player's aim and close in; behind gets round the back of the aim; rush "
+    "goes straight at the player; spread steps out of the line of fire. Split the horde across sides so one burst "
+    "cannot kill several, send healthy groups round and wounded ones straight in, and never send everyone down the "
+    'firing line. Reply with JSON only, no prose, short: {"default":"<move for every group not listed>",'
+    '"moves":[{"g":<group id>,"m":"<move>"}, ...]}, exceptions only.'
 )
 
 # Kept for callers that import the old name.
@@ -66,6 +69,7 @@ def observation_prompt(observation: Observation) -> str:
     def view(creature: Any) -> dict[str, int]:
         return {"i": creature.index, "x": round(creature.x), "y": round(creature.y), "hp": round(creature.hp)}
 
+
     payload = {
         "tick": observation.tick,
         "player_x": round(observation.player_x),
@@ -75,6 +79,22 @@ def observation_prompt(observation: Observation) -> str:
         "player_aim_y": round(observation.player_aim_y),
         "owned": [view(creature) for creature in observation.owned],
         "others": [view(creature) for creature in observation.others],
+    }
+    return json.dumps(payload, separators=(",", ":"))
+
+
+def group_prompt(observation: Observation) -> str:
+    """The user message in moves mode: the owned creatures as groups, the others as a count (fewer tokens)."""
+
+    payload = {
+        "tick": observation.tick,
+        "player_x": round(observation.player_x),
+        "player_y": round(observation.player_y),
+        "player_health": round(observation.player_health),
+        "player_aim_x": round(observation.player_aim_x),
+        "player_aim_y": round(observation.player_aim_y),
+        "groups": [{"g": g.id, "n": g.count, "x": round(g.x), "y": round(g.y), "hp": round(g.hp)} for g in observation.groups],
+        "others": len(observation.others),
     }
     return json.dumps(payload, separators=(",", ":"))
 
@@ -123,9 +143,10 @@ def parse_moves(reply: str, observation: Observation) -> tuple[Steer, ...]:
     if not isinstance(data, dict):
         return ()
     owned = {creature.index: creature for creature in observation.owned}
+    groups = {group.id: group for group in observation.groups}
     steers: dict[int, Steer] = {}
     default = data.get("default")
-    if isinstance(default, str) and default.strip().lower() in MOVES:
+    if isinstance(default, str) and default.strip().lower() in LLM_MOVES:
         move = default.strip().lower()
         for index, creature in owned.items():
             steers[index] = steer_for_move(move, observation, creature)
@@ -136,13 +157,23 @@ def parse_moves(reply: str, observation: Observation) -> tuple[Steer, ...]:
         if not isinstance(item, dict):
             continue
         try:
-            index = int(item["i"])
             move = str(item["m"]).strip().lower()
         except (KeyError, TypeError, ValueError):
             continue
-        if index not in owned or move not in MOVES:
+        if move not in LLM_MOVES:
             continue
-        steers[index] = steer_for_move(move, observation, owned[index])
+        indices: list[int] = []
+        try:
+            if "g" in item:
+                group = groups.get(int(item["g"]))
+                indices = list(group.members) if group is not None else []
+            elif "i" in item:
+                indices = [int(item["i"])]
+        except (TypeError, ValueError):
+            continue
+        for index in indices:
+            if index in owned:
+                steers[index] = steer_for_move(move, observation, owned[index])
     return tuple(steers[index] for index in sorted(steers))
 
 
@@ -161,7 +192,7 @@ class LlmMind:
         model: str = "",
         temperature: float = 0.8,
         seed: int | None = None,
-        max_tokens: int = 240,
+        max_tokens: int = 120,
         timeout_s: float = 60.0,
         api_key: str = "",
         json_mode: bool = True,
@@ -208,7 +239,7 @@ class LlmMind:
             return json.loads(response.read().decode("utf-8"))
 
     def decide(self, observation: Observation) -> Decision:
-        prompt = observation_prompt(observation)
+        prompt = group_prompt(observation) if self.mode == "moves" else observation_prompt(observation)
         try:
             data = self._request(prompt)
             reply = str(data["choices"][0]["message"]["content"])
