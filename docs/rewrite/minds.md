@@ -98,7 +98,25 @@ from? From the minds. `crimson minds stochastic` plays one run seed, one pilot, 
 at temperature, a heuristic on a fresh seed each time) makes N different games, each of which verifies. With
 `--llm-seed` fixed and temperature 0 the model server is deterministic on the same build, and N recordings
 come out identical: the test that the variation is the mind's and nothing else's. With the flank heuristic on
-the ring, seed 7, ten games: ten distinct recordings, the pilot dead in six, alive between 23 and 60 s.
+the ring, seed 7, ten games (cadence 15, 60 s cap): ten distinct recordings, the pilot dead in six, alive between
+23 and 60 s; the surround heuristic, eight dead, alive 8 to 60 s; random steering, none dead.
+
+Qwen2.5-7B-Instruct as one general over the whole horde, groups mode, asked twice a second, 40 s cap, ring seed 7:
+
+| temperature | model seed | games | distinct recordings | pilot health at the end | kills | all verified |
+| --- | --- | ---: | ---: | --- | --- | --- |
+| 0.9 | none | 4 | 4 | 90, 0, 100, 80 | 52, 59, 57, 65 | yes |
+| 0 | fixed | 2 | 1 | 100, 100 | 22, 22 | yes |
+
+Four games, four different hordes: in one the pilot ends on its last hit point, in another untouched. The two
+games at temperature zero with a fixed sampling seed are byte-identical recordings, so the variation is the
+model's sampling and nothing else; the simulation, the pilot and the recording contribute none. Each call took
+about 6.6 s on an M1 iMac (the prompt is ~430 tokens, most of it the system prompt), so a 40 s game takes
+8 to 10 minutes of wall time; the recording plays in real time.
+
+Governed, the same model as two minds with 120 credits each (ring seed 7, 40 s): 49 inferences, 21,742 tokens,
+244 credits spent, then 111 refusals as the budgets ran dry and the native AI took the horde back; the
+ungoverned pair made 142 inferences on 66,139 tokens. Both pilots ended untouched on that seed; both runs verify.
 
 ### What it shows
 
