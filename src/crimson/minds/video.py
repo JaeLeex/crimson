@@ -223,7 +223,7 @@ def _usd(value: float) -> str:
 
 
 def make_callbacks(
-    timeline: MeterTimeline, *, width: int = 512, height: int = 512,
+    timeline: MeterTimeline, *, width: int = 512, height: int = 512, strip: bool = True,
 ) -> tuple[Callable[[ReplayPlaybackMode], None], Callable[[ReplayPlaybackMode], None]]:
     schedule: list[dict[int, int]] = []
 
@@ -244,12 +244,14 @@ def make_callbacks(
         for slot, mind in slots(mode).items():
             creature = entries[slot]
             screen = mode.runtime.world_to_screen(creature.pos)
-            if not (0 <= screen.x <= width and 0 <= screen.y < top):
+            if not (0 <= screen.x <= width and 0 <= screen.y < (top if strip else height)):
                 continue
             radius = max(8, int(float(creature.size) * 0.42))
             ring = rl_color(*MIND_BYTES[mind % len(MIND_BYTES)], 220)
             rl.draw_circle_lines(int(screen.x), int(screen.y), radius, ring)
             rl.draw_circle_lines(int(screen.x), int(screen.y), radius + 1, ring)
+        if not strip:
+            return
         rl.draw_rectangle_rec(rl_rectangle(0, top, width, STRIP_HEIGHT), rl_color(0, 0, 0, 170))
 
         def text(value: str, x: float, y: float, colour: tuple[int, int, int], *, limit: float | None = None) -> float:

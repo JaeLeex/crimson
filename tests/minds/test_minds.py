@@ -474,3 +474,22 @@ def test_the_tint_override_is_render_only_and_empty_by_default() -> None:
     finally:
         overrides.clear_creature_tints()
     assert overrides.CREATURE_TINT_OVERRIDE == {}
+
+
+def test_clip_status_follows_the_brief_wording(tmp_path) -> None:
+    from crimson.minds.compose import _status
+    from crimson.minds.video import MeterTimeline
+
+    governed = tmp_path / "g"
+    governed.mkdir()
+    _write_run_dir(governed, governed=True, budget=100, calls=[(15, 2000, 50), (30, 2000, 49)], refusal_tick=45)
+    track = MeterTimeline.from_run_dir(governed).tracks[0]
+    assert _status(track, 30, True)[0] == "AI active"
+    assert _status(track, 45, True)[0] == "Budget cap · Game continues"
+
+    disabled = tmp_path / "d"
+    disabled.mkdir()
+    _write_run_dir(disabled, governed=False, budget=60, calls=[(15, 2000, 50), (30, 2000, 49)])
+    over = MeterTimeline.from_run_dir(disabled).tracks[0]
+    assert _status(over, 15, False)[0] == "AI active"
+    assert _status(over, 30, False)[0] == "AI active · over allowance"

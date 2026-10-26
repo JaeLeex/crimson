@@ -709,3 +709,62 @@ def cmd_minds_audit(
     typer.echo(f"{len(checks) - failed}/{len(checks)} checks passed")
     if failed:
         raise typer.Exit(code=1)
+
+
+@minds_app.command("clip")
+def cmd_minds_clip(
+    run_dirs: list[Path] = typer.Argument(..., help="two or four run directories (each with run.crd, receipts.jsonl, run.minds.json)"),
+    out: Path = typer.Option(..., "--out", help="output .mp4"),
+    names: str = typer.Option(..., "--names", help="panel names separated by ';', one per run"),
+    title: str = typer.Option("Meter AI usage. Set a budget.", "--title"),
+    corner: str = typer.Option("Recorded demo", "--corner", help="small persistent label, top right"),
+    legend: str = typer.Option("Ringed enemies are steered by the AI model; the rest run on the game's built-in AI.", "--legend"),
+    seconds: float = typer.Option(22.0, "--seconds", help="clip length; one game tick per frame at 60 fps"),
+    tile: int = typer.Option(512, "--tile", help="game panel size in pixels"),
+    assets_dir: Path = typer.Option(Path("artifacts/assets"), "--assets-dir"),
+    base_dir: Path = _BASE_DIR,
+) -> None:
+    """A readable metering clip: the games with their AI-steered enemies ringed, large meters under each game."""
+    import shutil
+    import tempfile
+
+    from ..minds.compose import Panel, compose
+    from ..minds.video import MeterTimeline, make_callbacks
+    from ..render.world.overrides import clear_creature_tints
+    from ..replay.codec import load_replay_file
+    from ..replay.driver.replay_render import ReplayRenderError, run_replay_render_video
+
+    labels = [part.strip() for part in names.split(";")]
+    if len(run_dirs) not in (2, 4) or len(labels) != len(run_dirs):
+        typer.echo("give two or four run directories and one name per run", err=True)
+        raise typer.Exit(code=2)
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        typer.echo("ffmpeg not found on PATH", err=True)
+        raise typer.Exit(code=1)
+    frames = int(round(seconds * 60))
+    with tempfile.TemporaryDirectory(prefix="crimson-minds-clip-") as tmp:
+        panels: list[Panel] = []
+        for index, (run_dir, label) in enumerate(zip(run_dirs, labels, strict=True)):
+            timeline = MeterTimeline.from_run_dir(run_dir)
+            replay = load_replay_file(run_dir / "run.crd")
+            video = Path(tmp) / f"panel-{index}.mp4"
+            before_draw, on_frame = make_callbacks(timeline, width=tile, height=tile, strip=False)
+            typer.echo(f"rendering {label}: {run_dir}", err=True)
+            try:
+                run_replay_render_video(
+                    replay, replay_path=run_dir / "run.crd", output_path=video, base_dir=base_dir, assets_dir=assets_dir,
+                    width=tile, height=tile, max_ticks=frames, preset="veryfast", overwrite=True,
+                    before_draw=before_draw, on_frame=on_frame,
+                )
+            except ReplayRenderError as exc:
+                typer.echo(f"render failed: {exc}", err=True)
+                raise typer.Exit(code=1) from exc
+            finally:
+                clear_creature_tints()
+            enforced = all(track.governed for track in timeline.tracks)
+            panels.append(Panel(video=video, timeline=timeline, name=label, enforced=enforced, ticks=len(replay.ticks)))
+        out.parent.mkdir(parents=True, exist_ok=True)
+        typer.echo(f"composing {frames} frames", err=True)
+        compose(panels, out, ffmpeg=ffmpeg, title=title, corner=corner, legend=legend, frames=frames, tile=tile)
+    typer.echo(f"wrote {out}")
