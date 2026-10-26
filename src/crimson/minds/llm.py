@@ -61,6 +61,8 @@ class Exchange(msgspec.Struct, frozen=True):
     steers: int
     ok: bool
     error: str = ""
+    # Seconds the call took, request to reply.
+    latency_s: float = 0.0
 
 
 def observation_prompt(observation: Observation) -> str:
@@ -239,7 +241,10 @@ class LlmMind:
             return json.loads(response.read().decode("utf-8"))
 
     def decide(self, observation: Observation) -> Decision:
+        import time
+
         prompt = group_prompt(observation) if self.mode == "moves" else observation_prompt(observation)
+        started = time.perf_counter()
         try:
             data = self._request(prompt)
             reply = str(data["choices"][0]["message"]["content"])
@@ -250,7 +255,7 @@ class LlmMind:
             self.failures += 1
             error = f"{type(exc).__name__}: {exc}"
             self.transcript.append(
-                Exchange(tick=observation.tick, prompt=prompt, reply="", prompt_tokens=0, completion_tokens=0, steers=0, ok=False, error=error),
+                Exchange(tick=observation.tick, prompt=prompt, reply="", prompt_tokens=0, completion_tokens=0, steers=0, ok=False, error=error, latency_s=round(time.perf_counter() - started, 3)),
             )
             return Decision(ok=False, note=error)
         steers = parse_moves(reply, observation) if self.mode == "moves" else parse_steers(reply, observation)
@@ -263,6 +268,7 @@ class LlmMind:
                 completion_tokens=completion_tokens,
                 steers=len(steers),
                 ok=True,
+                latency_s=round(time.perf_counter() - started, 3),
             ),
         )
         return Decision(steers=steers, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)

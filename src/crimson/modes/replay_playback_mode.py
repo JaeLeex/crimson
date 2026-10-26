@@ -138,6 +138,17 @@ class ReplayPlaybackMode:
         return runtime
 
     @property
+    def replay(self) -> Replay:
+        """The recording being played (read-only), for renderers that annotate it."""
+        return self._replay
+
+    @property
+    def small_font(self) -> SmallFontData:
+        font = self._small
+        assert font is not None, "small font must be loaded before replay ui draw"
+        return font
+
+    @property
     def driver(self) -> PlaybackDriver:
         driver = self._driver
         assert driver is not None, "Replay driver must be open before replay playback"

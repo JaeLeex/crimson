@@ -244,3 +244,24 @@ Ring seed 7, two Jev minds, 30 s, temperature 0.5 (2026-10-26):
 The first governed run on chain overspent (324 and 315 against 300): the ledger charged after the call and
 refused only once the balance was already gone, so the last call overshot. The chain refused both debits. The
 ledger now reserves the dearest call seen before asking a governed mind again.
+
+## Metering video
+
+`crimson minds grid` draws the metering on top of runs that carry `run.minds.json` and `receipts.jsonl`
+(`--no-meters` turns it off):
+
+- **Who controls each enemy.** A creature a mind is steering is drawn in that mind's colour (mind 0 orange,
+  mind 1 cyan) with a ring of the same colour; native creatures keep their own colour, so a capped or revoked
+  mind's enemies visibly turn back. This is render-only: `crimson.render.world.overrides` holds the colours the
+  creature draw uses for those slots, and the simulation's own `CreatureState.tint` (read by fire damage and
+  corpse decals) is never touched. Who is steering comes from the recorded commands (`steer_schedule`), because
+  the session's `steer_holds` holds only what carries into the next tick.
+- **The metering strip** along the bottom of each tile: the run's AI cost so far (dollars at the model's
+  published price, or "$0 API (self-hosted)"); one bar per mind of credits left on its chain budget, with
+  ACTIVE / BUDGET CAP / REVOKED ON CHAIN / OVER CAP +N, and a red overdraft bar for an ungoverned mind past its
+  cap; the latest model calls (model, call number, tokens, latency, credits, dollars); the latest event.
+- **Cards.** `--title`/`--subtitle` put a 4 s title card with the colour legend first; for runs settled on
+  Nunchi a 7 s end card follows with each mind's on-chain debit (block, transaction) or the chain's refusal,
+  revocations, the AI metered, and the audit result, which `audit_run` computes against the chain at render time.
+
+`run_replay_render_video` takes the two hooks this uses, `before_draw` and `on_frame`; both default to none.

@@ -428,6 +428,10 @@ def cmd_minds_grid(
     size: int = typer.Option(640, "--size", help="render size per tile (square)"),
     max_ticks: int | None = typer.Option(None, "--max-ticks"),
     assets_dir: Path = typer.Option(Path("artifacts/assets"), "--assets-dir", help="assets root holding the .paq files"),
+    meters: bool = typer.Option(True, "--meters/--no-meters", help="metering strip + enemies tinted by mind (runs with run.minds.json)"),
+    title: str = typer.Option("", "--title", help="title card text (3 s before the grid)"),
+    subtitle: str = typer.Option("", "--subtitle", help="title card subtitle"),
+    end_card: bool = typer.Option(True, "--end-card/--no-end-card", help="settlement card after the grid (runs settled on Nunchi; audits them on chain)"),
     base_dir: Path = _BASE_DIR,
 ) -> None:
     """Render two or four replays as one labelled video: side by side, or a 2x2 grid, through ffmpeg."""
@@ -435,6 +439,8 @@ def cmd_minds_grid(
     import subprocess
     import tempfile
 
+    from ..minds.video import MeterTimeline, make_callbacks
+    from ..render.world.overrides import clear_creature_tints
     from ..replay.codec import load_replay_file
     from ..replay.driver.replay_render import ReplayRenderError, run_replay_render_video
 
@@ -462,6 +468,9 @@ def cmd_minds_grid(
         for index, path in enumerate(replays):
             tile = Path(tmp) / f"tile-{index}.mp4"
             typer.echo(f"rendering {names[index]}: {path}", err=True)
+            before_draw = on_frame = None
+            if meters and path.with_name("run.minds.json").is_file() and path.with_name("receipts.jsonl").is_file():
+                before_draw, on_frame = make_callbacks(MeterTimeline.from_run_dir(path.parent), width=size, height=size)
             try:
                 run_replay_render_video(
                     load_replay_file(path),
@@ -474,10 +483,14 @@ def cmd_minds_grid(
                     max_ticks=max_ticks,
                     preset="veryfast",
                     overwrite=True,
+                    before_draw=before_draw,
+                    on_frame=on_frame,
                 )
             except ReplayRenderError as exc:
                 typer.echo(f"render failed: {exc}", err=True)
                 raise typer.Exit(code=1) from exc
+            finally:
+                clear_creature_tints()
             label = Path(tmp) / f"label-{index}.png"
             _label_png(names[index], label, width=size)
             tiles.append(tile)
@@ -497,12 +510,55 @@ def cmd_minds_grid(
         else:
             graph += "[t0][t1][t2][t3]xstack=inputs=4:layout=0_0|w0_0|0_h0|w0_h0[v]"
         out.parent.mkdir(parents=True, exist_ok=True)
+        grid = Path(tmp) / "grid.mp4"
         command = [ffmpeg, "-y", "-loglevel", "error", *inputs, "-filter_complex", graph, "-map", "[v]", "-t", f"{longest:.3f}"]
-        command += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", str(out)]
+        command += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-r", "60", str(grid)]
         completed = subprocess.run(command, check=False, capture_output=True, text=True)
         if completed.returncode != 0:
             typer.echo(f"ffmpeg failed: {completed.stderr.strip()}", err=True)
             raise typer.Exit(code=1)
+        grid_w, grid_h = (2 * size, size) if len(tiles) == 2 else (2 * size, 2 * size)
+        parts: list[tuple[Path, float]] = []
+        if title:
+            from ..minds.cards import title_card
+
+            card = Path(tmp) / "title.png"
+            title_card(card, width=grid_w, height=grid_h, title=title, subtitle=subtitle)
+            parts.append((card, 4.0))
+        parts.append((grid, 0.0))
+        settled = [path.parent for path in replays if path.with_name("run.minds.json").is_file()]
+        if end_card and len(settled) == len(replays) and all(
+            json.loads((d / "run.minds.json").read_text(encoding="utf-8")).get("settlement") for d in settled
+        ):
+            from ..minds.audit import audit_run
+            from ..minds.cards import end_card as draw_end_card
+
+            blocks: list[tuple[Path, str, tuple[int, int] | None]] = []
+            for run_dir, name in zip(settled, names, strict=True):
+                try:
+                    checks = audit_run(run_dir)
+                    audit: tuple[int, int] | None = (sum(passed for _, passed, _ in checks), len(checks))
+                except Exception as exc:  # noqa: BLE001 - the card says the audit could not run instead
+                    typer.echo(f"audit of {run_dir} failed: {exc}", err=True)
+                    audit = None
+                blocks.append((run_dir, name, audit))
+            card = Path(tmp) / "end.png"
+            draw_end_card(card, width=grid_w, height=grid_h, tiles=blocks)
+            parts.append((card, 7.0))
+        if len(parts) == 1:
+            shutil.copyfile(grid, out)
+        else:
+            inputs = []
+            for part, seconds in parts:
+                inputs += ["-loop", "1", "-t", f"{seconds}", "-framerate", "60", "-i", str(part)] if seconds else ["-i", str(part)]
+            scaled = "".join(f"[{i}:v]scale={grid_w}:{grid_h},setsar=1,fps=60,format=yuv420p[c{i}];" for i in range(len(parts)))
+            joined = "".join(f"[c{i}]" for i in range(len(parts))) + f"concat=n={len(parts)}:v=1:a=0[v]"
+            command = [ffmpeg, "-y", "-loglevel", "error", *inputs, "-filter_complex", scaled + joined, "-map", "[v]"]
+            command += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", str(out)]
+            completed = subprocess.run(command, check=False, capture_output=True, text=True)
+            if completed.returncode != 0:
+                typer.echo(f"ffmpeg failed: {completed.stderr.strip()}", err=True)
+                raise typer.Exit(code=1)
     typer.echo(f"wrote {out}")
 
 
@@ -648,59 +704,13 @@ def cmd_minds_audit(
     re-adds each mind's spend from the receipt log; and reads each mind's lease authorization, balance and usage
     back from the chain.
     """
-    from ..minds.nunchi import NunchiChain, NunchiError, settlement_receipt, sha256_hex
-    from ..replay.codec import encode_replay_payload, load_replay_file
-    from ..replay.driver.playback_driver import PlaybackDriver
-    from ..sim.run_result import run_result_mismatches
+    from ..minds.audit import audit_run
 
-    meta = json.loads((run_dir / "run.minds.json").read_text(encoding="utf-8"))
-    settlement = meta.get("settlement")
-    if not settlement:
-        typer.echo("this run was not settled on Nunchi (no settlement in run.minds.json)", err=True)
-        raise typer.Exit(code=2)
-    chain = NunchiChain(rpc=nunchi_rpc or settlement["chain_rpc"])
-    checks: list[tuple[str, bool, str]] = []
-
-    replay = load_replay_file(run_dir / "run.crd")
-    mismatches = run_result_mismatches(replay.result, PlaybackDriver(replay, warn_on_version_mismatch=False).run())
-    checks.append(("the recording replays to the result it recorded", not mismatches, ",".join(mismatches)))
-    replay_sha = sha256_hex(encode_replay_payload(replay))
-    checks.append(("recording SHA-256 matches the settlement", replay_sha == settlement["replay_sha256"], replay_sha[:16]))
-    receipts_bytes = (run_dir / "receipts.jsonl").read_bytes()
-    receipts_sha = sha256_hex(receipts_bytes)
-    checks.append(("receipt log SHA-256 matches the settlement", receipts_sha == settlement["receipts_sha256"], receipts_sha[:16]))
-    log = [json.loads(line) for line in receipts_bytes.decode("utf-8").splitlines() if line.strip()]
-
-    for entry in settlement["minds"]:
-        mind_id = int(entry["mind"])
-        principal = entry["principal"]
-        admission = entry["admission"]
-        settled = entry["settlement"]
-        model = admission["model"]
-        label = f"mind {mind_id} ({principal})"
-        lease_path = run_dir / admission["lease_file"]
-        checks.append((f"{label}: lease file is the one admitted", sha256_hex(lease_path.read_bytes()) == admission["lease_sha256"], admission["lease_file"]))
-        receipt = settlement_receipt(replay_sha256=replay_sha, receipts_sha256=receipts_sha, principal=principal)
-        checks.append((f"{label}: settlement receipt recomputes", receipt == settled["receipt"] and sha256_hex(receipt.encode()) == settled["receipt_digest"], settled["receipt_digest"][:16]))
-        spent = sum(int(row.get("cost", 0)) for row in log if row.get("mind_id") == mind_id and row.get("kind") == "inference")
-        checks.append((f"{label}: receipt log adds up to the spend settled", spent == int(settled["spent"]), f"{spent} credits"))
-        try:
-            status = chain.status(principal=principal, model=model, lease=lease_path)
-        except NunchiError as exc:
-            checks.append((f"{label}: chain reachable", False, str(exc)))
-            continue
-        checks.append((f"{label}: chain holds the lease as authorized", bool(status["authorized"]), ""))
-        checks.append((f"{label}: chain balance equals the settled balance", int(status["balance"]) == int(settled["balance_after"]), f"{status['balance']}"))
-        checks.append((
-            f"{label}: chain usage equals the settled usage",
-            int(status["usage_cost_usd_micros_total"]) == int(settled["usage_cost_usd_micros_total"]) and int(status["usage_count"]) >= 1,
-            f"{status['usage_cost_usd_micros_total']} micro-USD, {status['usage_count']} record(s)",
-        ))
-        if settled["settled"]:
-            checks.append((f"{label}: chain debited exactly the spend", int(settled["balance_before"]) - int(settled["spent"]) == int(status["balance"]), ""))
-        else:
-            checks.append((f"{label}: chain refused the overdraw and left the balance whole", int(settled["balance_before"]) == int(status["balance"]), settled["refusal"]))
-
+    try:
+        checks = audit_run(run_dir, rpc=nunchi_rpc)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
     width = max(len(name) for name, _, _ in checks)
     for name, passed, note in checks:
         typer.echo(f"{'PASS' if passed else 'FAIL'}  {name.ljust(width)}  {note}")

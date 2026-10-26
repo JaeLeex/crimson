@@ -404,3 +404,73 @@ def test_a_governed_mind_never_spends_past_its_budget() -> None:
     assert account.spent == 78
     assert account.balance == 22
     assert account.spent <= 100
+
+
+def _write_run_dir(path, *, governed: bool, budget: int, calls: list[tuple[int, int, int]], refusal_tick: int | None = None, revoke_tick: int | None = None) -> None:
+    """A minimal run directory with one mind: `calls` are (tick, tokens, cost)."""
+
+    rows = [{"tick": t, "mind_id": 0, "kind": "inference", "tokens": tok, "cost": cost, "balance": 0, "detail": ""} for t, tok, cost in calls]
+    if refusal_tick is not None:
+        rows.append({"tick": refusal_tick, "mind_id": 0, "kind": "refusal", "tokens": 0, "cost": 0, "balance": 0, "detail": "budget_exhausted"})
+    if revoke_tick is not None:
+        rows.append({"tick": revoke_tick, "mind_id": 0, "kind": "revocation", "tokens": 0, "cost": 0, "balance": 0, "detail": "revoked_on_chain"})
+    rows.sort(key=lambda row: row["tick"])
+    (path / "receipts.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+    (path / "run.minds.json").write_text(json.dumps({"condition": "governed" if governed else "ungoverned", "accounts": [{"mind_id": 0, "model": "jev-latest", "budget": budget}]}))
+    (path / "lease-mind-0.json").write_text(json.dumps({"budget_credits": budget, "governed": governed, "model": "jev-latest", "usd_per_mtok": 0.042}))
+    (path / "transcript-0.jsonl").write_text("".join(json.dumps({"tick": t, "latency_s": 0.1, "ok": True}) + "\n" for t, _, _ in calls))
+
+
+def test_the_meter_timeline_tracks_spend_caps_overdrafts_and_revocations(tmp_path) -> None:
+    from crimson.minds.video import MeterTimeline
+
+    governed = tmp_path / "governed"
+    governed.mkdir()
+    _write_run_dir(governed, governed=True, budget=100, calls=[(15, 2000, 20), (30, 2000, 20), (45, 2000, 20)], refusal_tick=60, revoke_tick=90)
+    timeline = MeterTimeline.from_run_dir(governed)
+    track = timeline.tracks[0]
+    assert (track.spent(14), track.spent(15), track.spent(44), track.spent(45)) == (0, 20, 40, 60)
+    assert track.tokens(45) == 6000
+    assert track.usd(45) == pytest.approx(6000 * 0.042 / 1e6)
+    assert track.state(30)[0] == "AI ACTIVE"
+    assert track.state(60)[0] == "BUDGET CAP"
+    assert track.state(90)[0] == "REVOKED ON CHAIN"
+    assert [call.number for call in timeline.recent_calls(45, 2)] == [3, 2]
+    assert timeline.event(70) == "mind 0 hit its budget cap - native AI takes over"
+
+    ungoverned = tmp_path / "ungoverned"
+    ungoverned.mkdir()
+    _write_run_dir(ungoverned, governed=False, budget=30, calls=[(15, 2000, 20), (30, 2000, 20)])
+    over = MeterTimeline.from_run_dir(ungoverned).tracks[0]
+    assert over.state(15)[0] == "AI ACTIVE"
+    assert over.state(30)[0] == "OVER CAP +10"
+
+
+def test_the_steer_schedule_covers_every_tick_of_a_hold_and_lets_a_later_steer_replace_it() -> None:
+    from crimson.minds.video import steer_schedule
+
+    ticks = [_idle_tick() for _ in range(40)]
+    ticks[0] = _idle_tick([_steer(5, hold=15)])
+    ticks[10] = _idle_tick([msgspec.structs.replace(_steer(5, hold=15), mind_id=1)])
+    schedule = steer_schedule(ticks)
+    assert schedule[0] == {5: 0}
+    assert schedule[9] == {5: 0}
+    assert schedule[10] == {5: 1}
+    assert schedule[24] == {5: 1}
+    assert schedule[25] == {}
+
+
+def test_the_tint_override_is_render_only_and_empty_by_default() -> None:
+    from crimson.render.world import overrides
+    from grim.color import RGBA
+
+    own = RGBA(0.6, 0.8, 0.9, 0.5)
+    assert overrides.CREATURE_TINT_OVERRIDE == {}
+    assert overrides.creature_body_tint(3, own) is own
+    overrides.set_creature_tints({3: RGBA(1.0, 0.3, 0.0, 1.0)})
+    try:
+        assert overrides.creature_body_tint(3, own) == RGBA(1.0, 0.3, 0.0, 0.5)
+        assert overrides.creature_body_tint(4, own) is own
+    finally:
+        overrides.clear_creature_tints()
+    assert overrides.CREATURE_TINT_OVERRIDE == {}

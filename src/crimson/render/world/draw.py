@@ -34,6 +34,7 @@ from .creatures import (
 )
 from .effects import draw_effect_pool, draw_particle_pool, draw_sprite_effect_pool
 from .overlays import draw_aim_circle, draw_clock_gauge, draw_direction_arrows
+from .overrides import creature_body_tint
 from .projectiles import projectile_render, secondary_detonation_pass
 from .trooper import draw_player_trooper_sprite
 
@@ -343,7 +344,7 @@ def draw_creatures(render_ctx: WorldRenderCtx, *, ctx: WorldDrawContext) -> None
                 if lighting is not None and not shadow else nullcontext()
             )
             with body_scope:
-                for creature in creature_entries:
+                for index, creature in enumerate(creature_entries):
                     if not creature.active or creature.type_id != type_id:
                         continue
                     screen = viewport.world_to_screen_with(
@@ -369,7 +370,7 @@ def draw_creatures(render_ctx: WorldRenderCtx, *, ctx: WorldDrawContext) -> None
                     else:
                         tint = creature_color_to_rl(
                             creature_render_tint(
-                                creature.tint,
+                                creature_body_tint(index, creature.tint),
                                 max_hp=creature.max_hp,
                                 energizer_timer=frame.state.bonuses.energizer,
                                 death_timer=death_timer,

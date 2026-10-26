@@ -6,8 +6,9 @@ import shutil
 import subprocess
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import msgspec
 
@@ -15,6 +16,9 @@ from ...replay import REPLAY_TICK_RATE, Replay
 from ...sim.run_result import RunResult
 from .playback_driver import PlaybackDriver
 from .progress import replay_progress
+
+if TYPE_CHECKING:
+    from ...modes.replay_playback_mode import ReplayPlaybackMode
 
 X264Preset = Literal[
     "ultrafast",
@@ -139,6 +143,8 @@ def run_replay_render_video(
     overwrite: bool = False,
     mute_audio: bool = True,
     show_progress: bool = False,
+    before_draw: Callable[[ReplayPlaybackMode], None] | None = None,
+    on_frame: Callable[[ReplayPlaybackMode], None] | None = None,
 ) -> ReplayRenderResult:
     from grim.assets import load_runtime_resources, unload_runtime_resources
     from grim.raylib_api import rl
@@ -235,7 +241,11 @@ def run_replay_render_video(
                     mode.update(frame_dt)
                     rl.begin_drawing()
                     try:
+                        if before_draw is not None:
+                            before_draw(mode)
                         mode.draw()
+                        if on_frame is not None:
+                            on_frame(mode)
                     finally:
                         rl.end_drawing()
                     video_writer.write_frame()
