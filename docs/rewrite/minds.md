@@ -266,3 +266,13 @@ ledger now reserves the dearest call seen before asking a governed mind again.
   charged the credits (with the block) or refused the bill. `crimson minds audit` stays a separate command.
 
 `run_replay_render_video` takes the two hooks this uses, `before_draw` and `on_frame`; both default to none.
+
+## Readable clips
+
+`crimson minds clip <run dir>... --names "A; B" --out clip.mp4` renders each game with only its AI-steered enemies
+ringed and tinted, then lays out every frame at full resolution (Pillow): a title band ("Meter AI usage. Set a
+budget." by default), a persistent "Recorded demo" label, the games, and under each a large meter: status ("AI
+active" → "Budget cap · Game continues", or "AI active · over allowance" when enforcement is off), a usage bar
+against the allowance that continues in red past it, usage in demo credits, model calls and tokens, and the
+estimated model cost. Two panels share one bar scale (a comparison); four each get their own. One frame is one game
+tick, so the clip is in game time: the simulation waits for each model reply while recording.
