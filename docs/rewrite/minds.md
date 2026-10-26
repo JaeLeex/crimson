@@ -181,7 +181,33 @@ is refused. Ungoverned, nothing is refused; invalid steers are still dropped, si
 | `random` | a uniform random arena point per owned creature, from its own seed |
 | `flank` | each creature is dealt one side of the player's aim (left, right or behind) and keeps it; it rushes once near |
 | `surround` | each creature takes a slot on a ring round the player; once enough are in place, all rush |
+| `jev` | TypeSafe's Jev (System One): one Choice question per group over the five moves, the whole horde in one request (~0.11 s); the mind samples each group's move from Jev's probabilities with its own seed and `--temperature` (0 = top move) |
 | `llm` | an OpenAI-compatible chat-completions server (`llama-server`, or anything serving `/v1/chat/completions`): compact JSON observation in; `{"moves":[{"i":..,"m":"flank_left"}]}` out (or `{"steers":[{"i":..,"x":..,"y":..}]}` in `coords` mode); lenient parsing, clamped to the arena, unknown indices and moves dropped |
 
 The source is `src/crimson/minds/`; the command type is `CreatureSteerCommand` in `src/crimson/sim/commands.py`,
 the session rules in `src/crimson/sim/sessions.py`, the codec rules in `src/crimson/replay/codec.py`.
+
+## Jev
+
+`--mind jev` asks TypeSafe's Jev (`POST https://api.typesafe.ai/v1/systemone`, key in `TYPESAFE_API_KEY`) one
+multiple-choice question per group and samples the moves from the returned probabilities (`crimson.minds.jev`).
+Ring scene, two minds asked four times a second (2026-10-26):
+
+- **Speed.** Median 0.11 s per call (max ~0.2 s), so a 60 s game plays in about 30 s: faster than real time.
+  About 750,000 input tokens per 60 s game for two minds, roughly $0.03 at the published $0.042 per million.
+- **Stochastic test, seed 7, ten games each:**
+
+  | temperature | distinct recordings | pilot deaths | pilot health, mean |
+  | --- | ---: | ---: | ---: |
+  | 0.5 | 10 | 2 | 40 |
+  | 1.0 | 10 | 0 | 86 |
+  | 2.0 | 10 | 2 | 59 |
+
+- **Not repeatable at the source.** Three games at temperature 0 (always the top move) still differed. Jev's
+  probabilities move a few points between identical requests, and on these states it is close to indifferent
+  (every move 0.2–0.3), so the top move flips between near-ties from the second decision on. Reproducibility
+  therefore lives in the recording, not in re-asking the model; every game above verifies.
+- **Against the native AI, ten seeds (100–109), 90 s:** native AI killed the pilot 3/10 (mean damage 42);
+  ungoverned Jev 0/10 (mean damage 15); governed Jev (2,000 credits per mind, exhausted half way, native AI after)
+  2/10 (mean damage 49). Ungoverned, Jev's near-even odds make the horde behave close to the random mind: it
+  scatters, and the pilot does better than against the native chase.

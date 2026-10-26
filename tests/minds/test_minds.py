@@ -339,3 +339,49 @@ def test_a_group_move_steers_every_member_of_the_group() -> None:
     assert steers[2] == (512.0, 362.0)
     assert '"groups":[' in group_prompt(observation)
     assert '"others":0' in group_prompt(observation)
+
+
+def test_jev_samples_moves_from_the_odds_with_its_own_seed() -> None:
+    import random
+
+    from crimson.minds.jev import sample_move
+
+    odds = {"flank_left": 0.1, "flank_right": 0.6, "behind": 0.2, "rush": 0.05, "spread": 0.05}
+    assert sample_move(odds, temperature=0.0, rng=random.Random(1)) == "flank_right"
+    draws = [sample_move(odds, temperature=1.0, rng=random.Random(seed)) for seed in range(200)]
+    assert len(set(draws)) >= 3
+    assert draws.count("flank_right") > draws.count("rush")
+    assert draws == [sample_move(odds, temperature=1.0, rng=random.Random(seed)) for seed in range(200)]
+
+
+def test_jev_mind_turns_one_answer_per_group_into_steers(monkeypatch: pytest.MonkeyPatch) -> None:
+    from crimson.minds.jev import JevMind
+
+    observation = msgspec.structs.replace(
+        observe(_survival_session(MINDS_RULES).world, tick=0, elapsed_ms=0.0, owned=()),
+        player_x=512.0,
+        player_y=512.0,
+        player_aim_x=612.0,
+        player_aim_y=512.0,
+        owned=(_view(1), _view(2), msgspec.structs.replace(_view(3), x=900.0, y=512.0)),
+    )
+    groups = observation.groups
+    sure = {"flank_left": 0.0, "flank_right": 0.0, "behind": 0.0, "rush": 1.0, "spread": 0.0}
+    left = {"flank_left": 1.0, "flank_right": 0.0, "behind": 0.0, "rush": 0.0, "spread": 0.0}
+    answers = {f"g{group.id}": {"type": "choice", "probabilities": sure if group.members == (3,) else left} for group in groups}
+    mind = JevMind(seed=1, temperature=1.0, api_key="test")
+    monkeypatch.setattr(mind, "_request", lambda body: {"answers": answers, "usage": {"input_tokens": 400}})
+    decision = mind.decide(observation)
+    targets = {steer.creature_index: (steer.target_x, steer.target_y) for steer in decision.steers}
+    assert targets == {1: (512.0, 362.0), 2: (512.0, 362.0), 3: (512.0, 512.0)}
+    assert decision.prompt_tokens == 400
+    assert mind.transcript[-1].ok
+
+    def boom(body: object) -> object:
+        raise OSError("down")
+
+    monkeypatch.setattr(mind, "_request", boom)
+    failed = mind.decide(observation)
+    assert not failed.ok
+    assert failed.steers == ()
+    assert mind.failures == 1

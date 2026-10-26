@@ -20,6 +20,7 @@ from ..sim.run_init import initialize_run
 from ..sim.run_result import RunResult, build_run_result
 from ..sim.run_spec import RunSpec
 from ..sim.state_types import TERRAIN_SIZE
+from .jev import JevExchange, JevMind
 from .ledger import Account, Ledger, Receipt
 from .llm import Exchange, LlmMind
 from .minds import Mind
@@ -82,7 +83,7 @@ class MindsRun:
     result: RunResult
     accounts: list[Account]
     receipts: list[Receipt]
-    transcripts: dict[int, list[Exchange]] = field(default_factory=dict)
+    transcripts: dict[int, list[Exchange | JevExchange]] = field(default_factory=dict)
     ticks: int = 0
     end_tick: int | None = None
     wall_s: float = 0.0
@@ -242,7 +243,9 @@ def run_minds(
     outcome = session.end_outcome() if end_tick is not None else session.terminal_outcome() or session.end_outcome()
     result = build_run_result(session, outcome=outcome)
     replay = recorder.finish(result)
-    transcripts = {mind_id: list(bound.mind.transcript) for mind_id, bound in enumerate(minds) if isinstance(bound.mind, LlmMind)}
+    transcripts: dict[int, list[Exchange | JevExchange]] = {
+        mind_id: list(bound.mind.transcript) for mind_id, bound in enumerate(minds) if isinstance(bound.mind, (LlmMind, JevMind))
+    }
     return MindsRun(
         replay=replay,
         result=result,

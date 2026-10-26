@@ -44,6 +44,7 @@ def _build_minds(
     llm_mode: str = "moves",
 ) -> list[BoundMind]:
     from ..minds.driver import BoundMind
+    from ..minds.jev import JevMind
     from ..minds.llm import LlmMind
     from ..minds.minds import FlankMind, IdleMind, RandomMind, SurroundMind
 
@@ -59,6 +60,8 @@ def _build_minds(
                 mind = FlankMind(mind_seed)
             case "surround":
                 mind = SurroundMind(mind_seed)
+            case "jev":
+                mind = JevMind(f"jev-{index}", seed=mind_seed, temperature=temperature, model=model or "jev-latest", timeout_s=timeout_s)
             case "llm":
                 mind = LlmMind(
                     f"llm-{index}",
@@ -70,7 +73,7 @@ def _build_minds(
                     mode=llm_mode,
                 )
             case _:
-                typer.echo(f"unknown mind kind {kind!r}; use idle, random, flank, surround or llm", err=True)
+                typer.echo(f"unknown mind kind {kind!r}; use idle, random, flank, surround, jev or llm", err=True)
                 raise typer.Exit(code=2)
         bound.append(BoundMind(mind=mind, budget=budget, price_per_1k_tokens=int(price)))
     return bound
@@ -139,7 +142,7 @@ def _summary_line(label: str, run: MindsRun, *, verified: bool) -> str:
 
 @minds_app.command("run")
 def cmd_minds_run(
-    mind: str = typer.Option("flank", "--mind", help="idle (native AI, the scripted baseline), random, flank, surround or llm"),
+    mind: str = typer.Option("flank", "--mind", help="idle (native AI, the scripted baseline), random, flank, surround, jev (TypeSafe) or llm"),
     minds: int = typer.Option(2, "--minds", help="how many minds share the horde (slots dealt round-robin)"),
     seed: int = typer.Option(0xBEEF, "--seed", help="uint32 run seed"),
     ticks: int = typer.Option(3600, "--ticks", help="ticks to play at most (60 per second)"),
@@ -326,6 +329,20 @@ def cmd_minds_compare(
     typer.echo(f"wrote {out / 'compare.json'} and one directory per run ({time.perf_counter() - started:.1f}s)")
 
 
+def _video_seconds(ffmpeg: str, path: Path) -> float:
+    """A video's duration, from ffprobe next to `ffmpeg`."""
+    import subprocess
+
+    ffprobe = str(Path(ffmpeg).with_name("ffprobe"))
+    completed = subprocess.run(
+        [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return float(completed.stdout.strip())
+
+
 def _label_png(text: str, path: Path, *, width: int) -> None:
     """A translucent label strip as a PNG, for ffmpeg builds without the drawtext filter."""
 
@@ -407,13 +424,20 @@ def cmd_minds_grid(
         inputs: list[str] = []
         for index, tile in enumerate(tiles):
             inputs += ["-i", str(tile), "-i", str(Path(tmp) / f"label-{index}.png")]
-        graph = "".join(f"[{2 * index}:v][{2 * index + 1}:v]overlay=0:0[t{index}];" for index in range(len(tiles)))
+        # A game that ends early holds its last frame until the longest one ends, so every ending stays visible.
+        durations = [_video_seconds(ffmpeg, tile) for tile in tiles]
+        longest = max(durations)
+        graph = "".join(
+            f"[{2 * index}:v]tpad=stop_mode=clone:stop_duration={longest - durations[index] + 0.1:.3f}[p{index}];"
+            f"[p{index}][{2 * index + 1}:v]overlay=0:0[t{index}];"
+            for index in range(len(tiles))
+        )
         if len(tiles) == 2:
-            graph += "[t0][t1]hstack=inputs=2:shortest=1[v]"
+            graph += "[t0][t1]hstack=inputs=2[v]"
         else:
-            graph += "[t0][t1][t2][t3]xstack=inputs=4:layout=0_0|w0_0|0_h0|w0_h0:shortest=1[v]"
+            graph += "[t0][t1][t2][t3]xstack=inputs=4:layout=0_0|w0_0|0_h0|w0_h0[v]"
         out.parent.mkdir(parents=True, exist_ok=True)
-        command = [ffmpeg, "-y", "-loglevel", "error", *inputs, "-filter_complex", graph, "-map", "[v]"]
+        command = [ffmpeg, "-y", "-loglevel", "error", *inputs, "-filter_complex", graph, "-map", "[v]", "-t", f"{longest:.3f}"]
         command += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", str(out)]
         completed = subprocess.run(command, check=False, capture_output=True, text=True)
         if completed.returncode != 0:

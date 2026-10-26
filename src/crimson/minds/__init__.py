@@ -11,6 +11,7 @@ replays bit for bit under the minds rules profile (`MINDS_RULES`), so `crimson r
 from __future__ import annotations
 
 from .driver import BoundMind, MindsRun, MindsRunConfig, run_minds
+from .jev import JevExchange, JevMind
 from .ledger import Account, Ledger, Receipt
 from .llm import Exchange, LlmMind
 from .minds import Decision, FlankMind, IdleMind, Mind, RandomMind, Steer, SurroundMind
@@ -25,6 +26,8 @@ __all__ = [
     "FlankMind",
     "GroupView",
     "IdleMind",
+    "JevExchange",
+    "JevMind",
     "Ledger",
     "LlmMind",
     "Mind",
