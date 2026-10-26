@@ -224,7 +224,10 @@ def _usd(value: float) -> str:
 
 def make_callbacks(
     timeline: MeterTimeline, *, width: int = 512, height: int = 512, strip: bool = True,
+    ring_log: list[list[tuple[int, int, int, int]]] | None = None,
 ) -> tuple[Callable[[ReplayPlaybackMode], None], Callable[[ReplayPlaybackMode], None]]:
+    """`ring_log`, when given, gets one entry per frame: the (slot, x, y, radius) of every ring drawn on it."""
+
     schedule: list[dict[int, int]] = []
 
     def slots(mode: ReplayPlaybackMode) -> dict[int, int]:
@@ -241,6 +244,9 @@ def make_callbacks(
         top = height - STRIP_HEIGHT
         # A ring in the mind's colour round every creature it steers, so ownership reads at any size.
         entries = mode.driver.session.world.creatures.entries
+        drawn: list[tuple[int, int, int, int]] = []
+        if ring_log is not None:
+            ring_log.append(drawn)
         for slot, mind in slots(mode).items():
             creature = entries[slot]
             screen = mode.runtime.world_to_screen(creature.pos)
@@ -250,6 +256,7 @@ def make_callbacks(
             ring = rl_color(*MIND_BYTES[mind % len(MIND_BYTES)], 220)
             rl.draw_circle_lines(int(screen.x), int(screen.y), radius, ring)
             rl.draw_circle_lines(int(screen.x), int(screen.y), radius + 1, ring)
+            drawn.append((slot, int(screen.x), int(screen.y), radius))
         if not strip:
             return
         rl.draw_rectangle_rec(rl_rectangle(0, top, width, STRIP_HEIGHT), rl_color(0, 0, 0, 170))

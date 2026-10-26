@@ -718,7 +718,7 @@ def cmd_minds_clip(
     names: str = typer.Option(..., "--names", help="panel names separated by ';', one per run"),
     title: str = typer.Option("Meter AI usage. Set a budget.", "--title"),
     corner: str = typer.Option("Recorded demo", "--corner", help="small persistent label, top right"),
-    legend: str = typer.Option("Ringed enemies are steered by the AI model; the rest run on the game's built-in AI.", "--legend"),
+    legend: str = typer.Option("Ringed enemies are steered by the AI model; the rest run on the game's built-in AI.", "--legend", help="four-panel clips only"),
     seconds: float = typer.Option(22.0, "--seconds", help="clip length; one game tick per frame at 60 fps"),
     tile: int = typer.Option(512, "--tile", help="game panel size in pixels"),
     assets_dir: Path = typer.Option(Path("artifacts/assets"), "--assets-dir"),
@@ -728,7 +728,7 @@ def cmd_minds_clip(
     import shutil
     import tempfile
 
-    from ..minds.compose import Panel, compose
+    from ..minds.compose import Panel, compose, compose_story
     from ..minds.video import MeterTimeline, make_callbacks
     from ..render.world.overrides import clear_creature_tints
     from ..replay.codec import load_replay_file
@@ -749,7 +749,8 @@ def cmd_minds_clip(
             timeline = MeterTimeline.from_run_dir(run_dir)
             replay = load_replay_file(run_dir / "run.crd")
             video = Path(tmp) / f"panel-{index}.mp4"
-            before_draw, on_frame = make_callbacks(timeline, width=tile, height=tile, strip=False)
+            rings: list[list[tuple[int, int, int, int]]] = []
+            before_draw, on_frame = make_callbacks(timeline, width=tile, height=tile, strip=False, ring_log=rings)
             typer.echo(f"rendering {label}: {run_dir}", err=True)
             try:
                 run_replay_render_video(
@@ -763,8 +764,13 @@ def cmd_minds_clip(
             finally:
                 clear_creature_tints()
             enforced = all(track.governed for track in timeline.tracks)
-            panels.append(Panel(video=video, timeline=timeline, name=label, enforced=enforced, ticks=len(replay.ticks)))
+            panels.append(Panel(video=video, timeline=timeline, name=label, enforced=enforced, ticks=len(replay.ticks), rings=rings))
         out.parent.mkdir(parents=True, exist_ok=True)
         typer.echo(f"composing {frames} frames", err=True)
-        compose(panels, out, ffmpeg=ffmpeg, title=title, corner=corner, legend=legend, frames=frames, tile=tile)
+        if len(panels) == 2:
+            # Two panels are the application comparison: timed captions replace the static legend.
+            moments = compose_story(panels, out, ffmpeg=ffmpeg, title=title, corner=corner, frames=frames, tile=tile)
+            typer.echo(" · ".join(f"{key} {value}" for key, value in moments.items()), err=True)
+        else:
+            compose(panels, out, ffmpeg=ffmpeg, title=title, corner=corner, legend=legend, frames=frames, tile=tile)
     typer.echo(f"wrote {out}")
