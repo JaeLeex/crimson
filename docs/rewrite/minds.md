@@ -211,3 +211,36 @@ Ring scene, two minds asked four times a second (2026-10-26):
   ungoverned Jev 0/10 (mean damage 15); governed Jev (2,000 credits per mind, exhausted half way, native AI after)
   2/10 (mean damage 49). Ungoverned, Jev's near-even odds make the horde behave close to the random mind: it
   scatters, and the pilot does better than against the native chase.
+
+## Settling on Nunchi
+
+`--nunchi` settles a run on a Nunchi settlement chain: a four-validator Commonware chain on the Nunchi SDK's
+settlement module, driven by the `nunchi-minds` binary (repo `nunchi-minds`; `crimson.minds.nunchi` calls it).
+
+- **Admit, before play.** Each mind is a principal `crimson/<run id>/mind-<n>`. The chain grants it permission
+  to use its model, issues its budget, and records its lease (run, mind, model, budget, price, seed; written
+  beside the replay as `lease-mind-<n>.json`) as an authorization keyed by the lease's SHA-256. The game's
+  ledger enforces the budget the chain issued.
+- **During play.** Every 300 ticks the game reads each mind's permission; a mind the operator revoked is refused
+  from then on and its creatures fall back to the native AI. `--revoke-at T --revoke-mind N` demonstrates the
+  switch by revoking on chain at tick T.
+- **Settle, after play.** Each mind's spend is debited on chain, and a usage record (inference cost in micro-USD,
+  Jev at its published $0.042 per million tokens) commits to the receipt
+  `crimson-minds/v1 replay=<sha256 of the replay payload> receipts=<sha256 of receipts.jsonl> principal=<p>`.
+  The chain will not debit past the balance: an overspent mind settles with `settled: false` and its balance
+  whole, and its usage is still recorded.
+- **Audit.** `crimson minds audit <run dir>` replays the recording, recomputes both digests and the receipt,
+  re-adds each mind's spend from the receipt log, and reads the lease authorization, balance and usage back from
+  the chain (17 checks for two minds).
+
+Ring seed 7, two Jev minds, 30 s, temperature 0.5 (2026-10-26):
+
+| scenario | mind 0 | mind 1 | audit |
+| --- | --- | --- | --- |
+| governed, 300 credits each | spent 297, debited, 3 left | spent 294, debited, 6 left | 17/17 |
+| ungoverned, 300 issued on chain | spent 1,966, refused, 300 left | spent 1,811, refused, 300 left | 17/17 |
+| governed, 1,500 each, operator revokes mind 0 at tick 600 | last call tick 585, spent 789, 711 left | ran to its budget at tick 1245 | 17/17 |
+
+The first governed run on chain overspent (324 and 315 against 300): the ledger charged after the call and
+refused only once the balance was already gone, so the last call overshot. The chain refused both debits. The
+ledger now reserves the dearest call seen before asking a governed mind again.

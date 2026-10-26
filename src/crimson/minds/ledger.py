@@ -43,6 +43,8 @@ class Account(msgspec.Struct):
     steers: int = 0
     refusals: int = 0
     invalid: int = 0
+    # The dearest decision so far: a governed mind is not asked when its balance could not cover another one.
+    max_cost: int = 0
 
 
 def inference_cost(tokens: int, price_per_1k_tokens: int) -> int:
@@ -56,6 +58,16 @@ class Ledger:
         self.accounts: dict[int, Account] = {int(account.mind_id): account for account in accounts}
         self.governed = bool(governed)
         self.receipts: list[Receipt] = []
+        # Minds whose permission the chain has revoked (governed runs stop asking them).
+        self.revoked: set[int] = set()
+
+    def revoke(self, mind_id: int, tick: int, *, detail: str = "revoked_on_chain") -> None:
+        """Record that the chain no longer permits this mind; a governed ledger refuses it from now on."""
+
+        account = self.accounts[int(mind_id)]
+        if int(mind_id) not in self.revoked:
+            self.revoked.add(int(mind_id))
+            self._receipt(account, tick, "revocation", detail=detail)
 
     def _receipt(self, account: Account, tick: int, kind: str, *, tokens: int = 0, cost: int = 0, detail: str = "") -> None:
         self.receipts.append(
@@ -66,7 +78,13 @@ class Ledger:
         """Whether the mind may be asked at all: a governed account with nothing left is refused before the call."""
 
         account = self.accounts[int(mind_id)]
-        if self.governed and account.budget is not None and account.balance <= 0:
+        if self.governed and int(mind_id) in self.revoked:
+            account.refusals += 1
+            self._receipt(account, tick, "refusal", detail="revoked_on_chain")
+            return False
+        if self.governed and account.budget is not None and (account.balance <= 0 or account.balance < account.max_cost):
+            # Charged after the call, so the check reserves the dearest call seen: the balance never goes negative
+            # and the debit settled on chain never exceeds what the chain issued.
             account.refusals += 1
             self._receipt(account, tick, "refusal", detail="budget_exhausted")
             return False
@@ -85,6 +103,7 @@ class Ledger:
         account.inferences += 1
         account.tokens += tokens
         account.spent += cost
+        account.max_cost = max(account.max_cost, cost)
         if account.budget is not None:
             account.balance -= cost
         self._receipt(account, tick, "inference", tokens=tokens, cost=cost)

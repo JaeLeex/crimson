@@ -170,7 +170,7 @@ def test_the_codec_refuses_steers_outside_the_minds_rules() -> None:
 def test_a_broke_mind_is_refused_and_its_creatures_fall_back_to_the_native_ai() -> None:
     run = run_minds([BoundMind(FlankMind(1), budget=100, price_per_1k_tokens=50)], MindsRunConfig(seed=SEED, ticks=900, governed=True))
     account = run.accounts[0]
-    assert account.balance <= 0
+    assert 0 <= account.balance < account.max_cost
     assert account.refusals > 0
     exhausted_at = min(receipt.tick for receipt in run.receipts if receipt.kind == "refusal" and receipt.detail == "budget_exhausted")
     assert max(receipt.tick for receipt in run.receipts if receipt.kind == "steer") < exhausted_at
@@ -385,3 +385,22 @@ def test_jev_mind_turns_one_answer_per_group_into_steers(monkeypatch: pytest.Mon
     assert not failed.ok
     assert failed.steers == ()
     assert mind.failures == 1
+
+
+def test_a_governed_mind_never_spends_past_its_budget() -> None:
+    """The ledger charges after a call, so it must refuse a call the balance could not cover."""
+
+    from crimson.minds.ledger import Account, Ledger
+
+    ledger = Ledger([Account(mind_id=0, name="m", model="x", budget=100, balance=100, price_per_1k_tokens=10)], governed=True)
+    spent_calls = 0
+    for tick in range(50):
+        if not ledger.may_infer(0, tick):
+            break
+        ledger.charge_inference(0, tick, prompt_tokens=2600, completion_tokens=0, ok=True)  # 26 credits a call
+        spent_calls += 1
+    account = ledger.accounts[0]
+    assert spent_calls == 3
+    assert account.spent == 78
+    assert account.balance == 22
+    assert account.spent <= 100

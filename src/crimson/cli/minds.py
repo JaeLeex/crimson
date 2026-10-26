@@ -16,6 +16,9 @@ from ..paths import default_runtime_dir
 if TYPE_CHECKING:
     from ..minds.driver import BoundMind, MindsRun
 
+# Jev's published price, US dollars per million input tokens (docs.typesafe.ai/models); output tokens are free.
+JEV_USD_PER_MTOK = 0.042
+
 minds_app = typer.Typer(add_completion=False, help="Creatures steered by minds: scripted, random, heuristic or a language model.")
 
 MindKind = Literal["idle", "random", "flank", "surround", "llm"]
@@ -27,6 +30,44 @@ _BASE_DIR = typer.Option(
     "--runtime-dir",
     help="base path for runtime files (default: per-user OS data dir; override with CRIMSON_RUNTIME_DIR)",
 )
+
+
+def _nunchi(enabled: bool, rpc: str):
+    if not enabled:
+        return None
+    from ..minds.nunchi import NunchiChain, NunchiError
+
+    chain = NunchiChain(rpc=rpc)
+    try:
+        chain._run("chain")
+    except NunchiError as exc:
+        typer.echo(f"Nunchi chain not reachable at {rpc}: {exc}\nstart it with ~/nunchi-minds/start-chain.sh", err=True)
+        raise typer.Exit(code=1) from exc
+    return chain
+
+
+def _settlement_line(run: MindsRun) -> str:
+    if not run.settlement:
+        return ""
+    parts = []
+    for entry in run.settlement["minds"]:
+        settled = entry["settlement"]
+        verdict = "settled" if settled["settled"] else f"REFUSED by chain ({settled['refusal']})"
+        parts.append(
+            f"{entry['principal']}: {verdict}, spent {settled['spent']}, balance {settled['balance_before']} -> {settled['balance_after']}, "
+            f"usage {settled['usage_cost_usd_micros_total']} micro-USD",
+        )
+    events = "; ".join(f"tick {e['tick']}: {e['event']} (mind {e['mind']})" for e in run.settlement["events"])
+    return "nunchi: " + " | ".join(parts) + (f" | events: {events}" if events else "")
+
+
+def _chain_cell(run: MindsRun) -> str:
+    """One word for a table: whether every mind settled on chain, or which the chain refused."""
+
+    if not run.settlement:
+        return "-"
+    refused = [entry["mind"] for entry in run.settlement["minds"] if not entry["settlement"]["settled"]]
+    return "settled" if not refused else "refused:" + ",".join(str(mind) for mind in refused)
 
 
 def _build_minds(
@@ -75,7 +116,8 @@ def _build_minds(
             case _:
                 typer.echo(f"unknown mind kind {kind!r}; use idle, random, flank, surround, jev or llm", err=True)
                 raise typer.Exit(code=2)
-        bound.append(BoundMind(mind=mind, budget=budget, price_per_1k_tokens=int(price)))
+        usd_per_mtok = JEV_USD_PER_MTOK if kind == "jev" else 0.0
+        bound.append(BoundMind(mind=mind, budget=budget, price_per_1k_tokens=int(price), usd_per_mtok=usd_per_mtok))
     return bound
 
 
@@ -98,7 +140,8 @@ def _write_run(run: MindsRun, out_dir: Path, *, condition: str, kind: str, verif
     out_dir.mkdir(parents=True, exist_ok=True)
     replay_path = out_dir / "run.crd"
     dump_replay_file(replay_path, run.replay)
-    (out_dir / "receipts.jsonl").write_bytes(b"".join(msgspec.json.encode(receipt) + b"\n" for receipt in run.receipts))
+    # Exactly the bytes the settlement receipt hashed.
+    (out_dir / "receipts.jsonl").write_bytes(run.receipts_jsonl)
     for mind_id, exchanges in run.transcripts.items():
         (out_dir / f"transcript-{mind_id}.jsonl").write_bytes(b"".join(msgspec.json.encode(item) + b"\n" for item in exchanges))
     meta = {
@@ -163,6 +206,11 @@ def cmd_minds_run(
     pilot_fire_on: int = typer.Option(20, "--pilot-fire-on", help="ticks the pilot holds fire per burst"),
     pilot_fire_off: int = typer.Option(20, "--pilot-fire-off", help="ticks the pilot rests between bursts"),
     out: Path | None = typer.Option(None, "--out", help="output directory (default: <base-dir>/minds/<timestamp>-<seed>)"),
+    nunchi: bool = typer.Option(False, "--nunchi/--no-nunchi", help="admit and settle the minds on the Nunchi chain"),
+    nunchi_rpc: str = typer.Option("http://127.0.0.1:47100", "--nunchi-rpc"),
+    chain_budget: int = typer.Option(2000, "--chain-budget", help="credits issued on chain to a mind without a local budget"),
+    revoke_at: int | None = typer.Option(None, "--revoke-at", help="demo: the operator revokes a mind on chain at this tick"),
+    revoke_mind: int = typer.Option(0, "--revoke-mind"),
     base_dir: Path = _BASE_DIR,
 ) -> None:
     """Play one minds run headlessly, verify it, and write run.crd, receipts.jsonl and run.minds.json."""
@@ -184,18 +232,21 @@ def cmd_minds_run(
         timeout_s=timeout_s,
         llm_mode=llm_mode,
     )
+    if out is None:
+        stamp = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ")
+        out = base_dir / "minds" / f"{stamp}-{seed}"
     config = MindsRunConfig(
         seed=seed, ticks=ticks, cadence=cadence, hold=hold, governed=governed, scene=scene, pilot=skill, others_limit=others,
+        nunchi=_nunchi(nunchi, nunchi_rpc), settle_dir=out, chain_budget=chain_budget, revoke_at_tick=revoke_at, revoke_mind=revoke_mind,
     )
     condition = "scripted" if mind == "idle" else ("governed" if governed else "ungoverned")
     typer.echo(f"minds run: {condition} scene={scene} mind={mind} x{len(bound)} seed={seed} ticks<={ticks} cadence={cadence}", err=True)
     run = run_minds(bound, config, progress=_progress_printer(600))
     verified, mismatches = _verify(run)
-    if out is None:
-        stamp = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ")
-        out = base_dir / "minds" / f"{stamp}-{seed}"
     replay_path = _write_run(run, out, condition=condition, kind=mind, verified=verified, mismatches=mismatches)
     typer.echo(_summary_line(condition, run, verified=verified))
+    if run.settlement:
+        typer.echo(_settlement_line(run))
     typer.echo(f"wrote {replay_path} (+ receipts.jsonl, run.minds.json); play it with: crimson replay play {replay_path}")
     if not verified:
         typer.echo(f"replay did not verify: {', '.join(mismatches)}", err=True)
@@ -254,6 +305,9 @@ def cmd_minds_compare(
     pilot_fire_off: int = typer.Option(20, "--pilot-fire-off"),
     conditions: str = typer.Option("scripted,ungoverned,governed", "--conditions", help="comma-separated subset"),
     out: Path | None = typer.Option(None, "--out", help="output directory (default: <base-dir>/minds/compare-<timestamp>)"),
+    nunchi: bool = typer.Option(False, "--nunchi/--no-nunchi", help="admit and settle every run's minds on the Nunchi chain"),
+    nunchi_rpc: str = typer.Option("http://127.0.0.1:47100", "--nunchi-rpc"),
+    chain_budget: int = typer.Option(2000, "--chain-budget", help="credits issued on chain to an ungoverned mind"),
     base_dir: Path = _BASE_DIR,
 ) -> None:
     """Play scripted, ungoverned and governed conditions over the same seeds and print one table."""
@@ -261,6 +315,7 @@ def cmd_minds_compare(
     from ..minds.pilot import PilotSkill
 
     skill = PilotSkill(aim_lag=pilot_aim_lag, fire_on=pilot_fire_on, fire_off=pilot_fire_off)
+    chain = _nunchi(nunchi, nunchi_rpc)
     wanted = tuple(part.strip() for part in conditions.split(",") if part.strip())
     if any(part not in ("scripted", "ungoverned", "governed") for part in wanted):
         typer.echo(f"unknown condition in {conditions!r}", err=True)
@@ -288,14 +343,18 @@ def cmd_minds_compare(
                 llm_mode=llm_mode,
             )
             typer.echo(f"  {condition:<10} seed={run_seed} ...", err=True)
+            run_dir = out / f"{condition}-{run_seed}"
             run = run_minds(
                 bound,
                 MindsRunConfig(
                     seed=run_seed, ticks=ticks, cadence=cadence, governed=governed, scene=scene, pilot=skill, others_limit=others,
+                    nunchi=chain, settle_dir=run_dir, chain_budget=chain_budget,
                 ),
             )
             verified, mismatches = _verify(run)
-            _write_run(run, out / f"{condition}-{run_seed}", condition=condition, kind=kind, verified=verified, mismatches=mismatches)
+            _write_run(run, run_dir, condition=condition, kind=kind, verified=verified, mismatches=mismatches)
+            if run.settlement:
+                typer.echo("    " + _settlement_line(run), err=True)
             accounts = run.accounts
             rows.append(
                 {
@@ -315,13 +374,14 @@ def cmd_minds_compare(
                     "refused": sum(account.refusals for account in accounts),
                     "invalid": sum(account.invalid for account in accounts),
                     "verified": verified,
+                    "chain": _chain_cell(run),
                     "wall_s": round(run.wall_s, 2),
                     "mind_s": round(run.mind_s, 2),
                 },
             )
     out.mkdir(parents=True, exist_ok=True)
     (out / "compare.json").write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
-    columns = ("condition", "seed", "ticks", "outcome", "elapsed_ms", "health", "damage", "kills", "xp", "steers", "inferences", "tokens", "spent", "refused", "invalid", "verified", "wall_s", "mind_s")
+    columns = ("condition", "seed", "ticks", "outcome", "elapsed_ms", "health", "damage", "kills", "xp", "steers", "inferences", "tokens", "spent", "refused", "invalid", "verified", "chain", "wall_s", "mind_s")
     widths = {column: max(len(column), *(len(str(row[column])) for row in rows)) for column in columns}
     typer.echo("  ".join(column.ljust(widths[column]) for column in columns))
     for row in rows:
@@ -475,6 +535,9 @@ def cmd_minds_stochastic(
     pilot_fire_on: int = typer.Option(20, "--pilot-fire-on"),
     pilot_fire_off: int = typer.Option(20, "--pilot-fire-off"),
     out: Path | None = typer.Option(None, "--out"),
+    nunchi: bool = typer.Option(False, "--nunchi/--no-nunchi", help="admit and settle every game's minds on the Nunchi chain"),
+    nunchi_rpc: str = typer.Option("http://127.0.0.1:47100", "--nunchi-rpc"),
+    chain_budget: int = typer.Option(2000, "--chain-budget"),
     base_dir: Path = _BASE_DIR,
 ) -> None:
     """Play one seed many times with the same pilot and see how much the games differ, each still verifying.
@@ -492,6 +555,7 @@ def cmd_minds_stochastic(
     skill = PilotSkill(aim_lag=pilot_aim_lag, fire_on=pilot_fire_on, fire_off=pilot_fire_off)
     if out is None:
         out = base_dir / "minds" / f"stochastic-{datetime.now(tz=UTC).strftime('%Y%m%dT%H%M%SZ')}"
+    chain = _nunchi(nunchi, nunchi_rpc)
     rows: list[dict[str, object]] = []
     digests: list[str] = []
     alive_list: list[float] = []
@@ -515,6 +579,7 @@ def cmd_minds_stochastic(
         typer.echo(f"  rep {rep + 1}/{reps} seed={seed} mind={mind} ...", err=True)
         config = MindsRunConfig(
             seed=seed, ticks=ticks, cadence=cadence, governed=not ungoverned, scene=scene, pilot=skill, others_limit=others,
+            nunchi=chain, settle_dir=out / f"rep-{rep}", chain_budget=chain_budget,
         )
         run = run_minds(bound, config)
         verified, mismatches = _verify(run)
@@ -540,6 +605,7 @@ def cmd_minds_stochastic(
                 "refused": sum(account.refusals for account in accounts),
                 "verified": verified,
                 "recording": digest[:12],
+                "chain": _chain_cell(run),
                 "wall_s": round(run.wall_s, 1),
             },
         )
@@ -558,7 +624,7 @@ def cmd_minds_stochastic(
         "deaths": sum(row["outcome"] == "death" for row in rows),
     }
     (out / "stochastic.json").write_text(json.dumps({"summary": summary, "rows": rows}, indent=2) + "\n", encoding="utf-8")
-    columns = ("rep", "outcome", "alive_s", "health", "kills", "steers", "inferences", "failed", "tokens", "refused", "verified", "recording", "wall_s")
+    columns = ("rep", "outcome", "alive_s", "health", "kills", "steers", "inferences", "failed", "tokens", "refused", "verified", "recording", "chain", "wall_s")
     widths = {column: max(len(column), *(len(str(row[column])) for row in rows)) for column in columns}
     typer.echo("  ".join(column.ljust(widths[column]) for column in columns))
     for row in rows:
@@ -569,3 +635,76 @@ def cmd_minds_stochastic(
         f"all verified={summary['all_verified']} ({time.perf_counter() - started:.0f}s)",
     )
     typer.echo(f"wrote {out / 'stochastic.json'}")
+
+
+@minds_app.command("audit")
+def cmd_minds_audit(
+    run_dir: Path = typer.Argument(..., exists=True, file_okay=False, help="a run directory written with --nunchi"),
+    nunchi_rpc: str | None = typer.Option(None, "--nunchi-rpc", help="chain RPC (default: the one the run settled on)"),
+) -> None:
+    """Re-check a settled run from its files and the chain, trusting neither the run's summary nor the game.
+
+    Replays the recording; recomputes the recording's and the receipt log's SHA-256 and the settlement receipt;
+    re-adds each mind's spend from the receipt log; and reads each mind's lease authorization, balance and usage
+    back from the chain.
+    """
+    from ..minds.nunchi import NunchiChain, NunchiError, settlement_receipt, sha256_hex
+    from ..replay.codec import encode_replay_payload, load_replay_file
+    from ..replay.driver.playback_driver import PlaybackDriver
+    from ..sim.run_result import run_result_mismatches
+
+    meta = json.loads((run_dir / "run.minds.json").read_text(encoding="utf-8"))
+    settlement = meta.get("settlement")
+    if not settlement:
+        typer.echo("this run was not settled on Nunchi (no settlement in run.minds.json)", err=True)
+        raise typer.Exit(code=2)
+    chain = NunchiChain(rpc=nunchi_rpc or settlement["chain_rpc"])
+    checks: list[tuple[str, bool, str]] = []
+
+    replay = load_replay_file(run_dir / "run.crd")
+    mismatches = run_result_mismatches(replay.result, PlaybackDriver(replay, warn_on_version_mismatch=False).run())
+    checks.append(("the recording replays to the result it recorded", not mismatches, ",".join(mismatches)))
+    replay_sha = sha256_hex(encode_replay_payload(replay))
+    checks.append(("recording SHA-256 matches the settlement", replay_sha == settlement["replay_sha256"], replay_sha[:16]))
+    receipts_bytes = (run_dir / "receipts.jsonl").read_bytes()
+    receipts_sha = sha256_hex(receipts_bytes)
+    checks.append(("receipt log SHA-256 matches the settlement", receipts_sha == settlement["receipts_sha256"], receipts_sha[:16]))
+    log = [json.loads(line) for line in receipts_bytes.decode("utf-8").splitlines() if line.strip()]
+
+    for entry in settlement["minds"]:
+        mind_id = int(entry["mind"])
+        principal = entry["principal"]
+        admission = entry["admission"]
+        settled = entry["settlement"]
+        model = admission["model"]
+        label = f"mind {mind_id} ({principal})"
+        lease_path = run_dir / admission["lease_file"]
+        checks.append((f"{label}: lease file is the one admitted", sha256_hex(lease_path.read_bytes()) == admission["lease_sha256"], admission["lease_file"]))
+        receipt = settlement_receipt(replay_sha256=replay_sha, receipts_sha256=receipts_sha, principal=principal)
+        checks.append((f"{label}: settlement receipt recomputes", receipt == settled["receipt"] and sha256_hex(receipt.encode()) == settled["receipt_digest"], settled["receipt_digest"][:16]))
+        spent = sum(int(row.get("cost", 0)) for row in log if row.get("mind_id") == mind_id and row.get("kind") == "inference")
+        checks.append((f"{label}: receipt log adds up to the spend settled", spent == int(settled["spent"]), f"{spent} credits"))
+        try:
+            status = chain.status(principal=principal, model=model, lease=lease_path)
+        except NunchiError as exc:
+            checks.append((f"{label}: chain reachable", False, str(exc)))
+            continue
+        checks.append((f"{label}: chain holds the lease as authorized", bool(status["authorized"]), ""))
+        checks.append((f"{label}: chain balance equals the settled balance", int(status["balance"]) == int(settled["balance_after"]), f"{status['balance']}"))
+        checks.append((
+            f"{label}: chain usage equals the settled usage",
+            int(status["usage_cost_usd_micros_total"]) == int(settled["usage_cost_usd_micros_total"]) and int(status["usage_count"]) >= 1,
+            f"{status['usage_cost_usd_micros_total']} micro-USD, {status['usage_count']} record(s)",
+        ))
+        if settled["settled"]:
+            checks.append((f"{label}: chain debited exactly the spend", int(settled["balance_before"]) - int(settled["spent"]) == int(status["balance"]), ""))
+        else:
+            checks.append((f"{label}: chain refused the overdraw and left the balance whole", int(settled["balance_before"]) == int(status["balance"]), settled["refusal"]))
+
+    width = max(len(name) for name, _, _ in checks)
+    for name, passed, note in checks:
+        typer.echo(f"{'PASS' if passed else 'FAIL'}  {name.ljust(width)}  {note}")
+    failed = sum(not passed for _, passed, _ in checks)
+    typer.echo(f"{len(checks) - failed}/{len(checks)} checks passed")
+    if failed:
+        raise typer.Exit(code=1)

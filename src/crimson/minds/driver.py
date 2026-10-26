@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import math
 import time
+import uuid
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
 import msgspec
 
 from ..game_modes import GameMode
 from ..game_version import MINDS_RULES
 from ..math_parity import f32
+from ..replay.codec import encode_replay_payload
 from ..replay.recorder import ReplayRecorder
 from ..replay.ticks import LiveTickSource, step_replay_tick
 from ..replay.types import Replay
@@ -24,6 +29,7 @@ from .jev import JevExchange, JevMind
 from .ledger import Account, Ledger, Receipt
 from .llm import Exchange, LlmMind
 from .minds import Mind
+from .nunchi import settlement_receipt, sha256_hex, write_lease
 from .observe import Observation, creature_is_live, observe
 from .pilot import AimBot, PilotSkill
 
@@ -35,6 +41,8 @@ class BoundMind:
     mind: Mind
     budget: int | None = 1000
     price_per_1k_tokens: int = 10
+    # What the model's tokens cost in US dollars per million (Jev publishes $0.042); settles as micro-USD on chain.
+    usd_per_mtok: float = 0.0
 
     def account(self, mind_id: int) -> Account:
         return Account(
@@ -63,6 +71,19 @@ class MindsRunConfig:
     perk_choice: int = 0
     # Ask the minds concurrently (a model server with several slots answers them together).
     parallel: bool = True
+    # Nunchi settlement (`crimson.minds.nunchi.NunchiChain`): admit each mind on chain before play, settle after.
+    nunchi: Any = None
+    # Where the leases are written (the run's output directory); required with `nunchi`.
+    settle_dir: Path | None = None
+    # A unique run id: the minds' on-chain principals are crimson/<run_id>/mind-<n>.
+    run_id: str = ""
+    # Credits issued on chain to a mind with no local budget (an ungoverned mind still settles against the chain).
+    chain_budget: int = 2000
+    # Read each mind's on-chain permission every this many ticks; a revoked mind is refused (governed runs).
+    permission_check_every: int = 300
+    # Demo of the operator's stop switch: revoke `revoke_mind` on chain at this tick.
+    revoke_at_tick: int | None = None
+    revoke_mind: int = 0
 
     def run_spec(self) -> RunSpec:
         match self.scene:
@@ -89,6 +110,10 @@ class MindsRun:
     wall_s: float = 0.0
     mind_s: float = 0.0
     steers_recorded: int = 0
+    # The receipt log exactly as written beside the replay (its SHA-256 is part of the settlement receipt).
+    receipts_jsonl: bytes = b""
+    # On-chain admission and settlement per mind, when the run was settled on Nunchi.
+    settlement: dict[str, Any] | None = None
 
     @property
     def player_health(self) -> float:
@@ -117,6 +142,7 @@ class MindsRun:
             "wall_s": round(self.wall_s, 3),
             "mind_s": round(self.mind_s, 3),
             "accounts": [msgspec.structs.asdict(account) for account in self.accounts],
+            "settlement": self.settlement,
         }
 
 
@@ -159,6 +185,12 @@ def run_minds(
     pilot = AimBot(config.pilot)
     ledger = Ledger((bound.account(mind_id) for mind_id, bound in enumerate(minds)), governed=config.governed)
     mind_count = len(minds)
+    run_id = config.run_id or uuid.uuid4().hex[:12]
+    principals = {mind_id: f"crimson/{run_id}/mind-{mind_id}" for mind_id in range(mind_count)}
+    admissions: dict[int, dict[str, Any]] = {}
+    events: list[dict[str, Any]] = []
+    if config.nunchi is not None:
+        admissions = _admit(minds, config, ledger, principals, run_id)
 
     started = time.perf_counter()
     mind_s = 0.0
@@ -171,6 +203,8 @@ def run_minds(
         return 0 <= index < len(entries) and creature_is_live(entries[index])
 
     for tick in range(int(config.ticks)):
+        if config.nunchi is not None:
+            _chain_checks(config, ledger, minds, principals, tick, events)
         source.poll([pilot.input(world)])
         player = world.players[0]
         if session.perk_menu_open:
@@ -243,6 +277,10 @@ def run_minds(
     outcome = session.end_outcome() if end_tick is not None else session.terminal_outcome() or session.end_outcome()
     result = build_run_result(session, outcome=outcome)
     replay = recorder.finish(result)
+    receipts_jsonl = ledger.receipts_jsonl()
+    settlement = None
+    if config.nunchi is not None:
+        settlement = _settle(minds, config, ledger, principals, admissions, events, replay, receipts_jsonl, run_id)
     transcripts: dict[int, list[Exchange | JevExchange]] = {
         mind_id: list(bound.mind.transcript) for mind_id, bound in enumerate(minds) if isinstance(bound.mind, (LlmMind, JevMind))
     }
@@ -257,4 +295,124 @@ def run_minds(
         wall_s=time.perf_counter() - started,
         mind_s=mind_s,
         steers_recorded=steers_recorded,
+        receipts_jsonl=receipts_jsonl,
+        settlement=settlement,
     )
+
+
+def _admit(
+    minds: Sequence[BoundMind],
+    config: MindsRunConfig,
+    ledger: Ledger,
+    principals: dict[int, str],
+    run_id: str,
+) -> dict[int, dict[str, Any]]:
+    """Admit every mind on chain (one at a time) and make the local accounts hold what the chain issued."""
+
+    settle_dir = config.settle_dir
+    if settle_dir is None:
+        raise ValueError("a Nunchi-settled run needs settle_dir for its leases")
+    chain = config.nunchi
+
+    def admit_one(mind_id: int) -> tuple[int, dict[str, Any]]:
+        bound = minds[mind_id]
+        budget = int(bound.budget) if bound.budget is not None else int(config.chain_budget)
+        lease = {
+            "kind": "crimson-minds/lease/v1",
+            "run_id": run_id,
+            "principal": principals[mind_id],
+            "mind": bound.mind.name,
+            "model": bound.mind.model,
+            "budget_credits": budget,
+            "price_per_1k_tokens": int(bound.price_per_1k_tokens),
+            "usd_per_mtok": float(bound.usd_per_mtok),
+            "governed": bool(config.governed),
+            "run_seed": int(config.seed),
+            "scene": config.scene,
+            "cadence": int(config.cadence),
+        }
+        lease_path = Path(settle_dir) / f"lease-mind-{mind_id}.json"
+        lease_bytes = write_lease(lease_path, lease)
+        admitted = chain.admit(principal=principals[mind_id], model=bound.mind.model, budget=budget, lease=lease_path)
+        admitted["lease_file"] = lease_path.name
+        admitted["lease_sha256"] = sha256_hex(lease_bytes)
+        return mind_id, admitted
+
+    # One writer account signs every settlement write, so writes go one at a time: two in flight would take the
+    # same nonce and the chain would keep only one of them.
+    admissions = dict(admit_one(mind_id) for mind_id in range(len(minds)))
+    for mind_id, admitted in admissions.items():
+        account = ledger.accounts[mind_id]
+        if minds[mind_id].budget is not None:
+            # The chain is the source of the budget the game enforces.
+            account.budget = int(admitted["balance"])
+            account.balance = int(admitted["balance"])
+    return admissions
+
+
+def _chain_checks(
+    config: MindsRunConfig,
+    ledger: Ledger,
+    minds: Sequence[BoundMind],
+    principals: dict[int, str],
+    tick: int,
+    events: list[dict[str, Any]],
+) -> None:
+    """The operator's stop switch (demo) and the periodic read of each mind's on-chain permission."""
+
+    chain = config.nunchi
+    if config.revoke_at_tick is not None and tick == int(config.revoke_at_tick):
+        mind_id = int(config.revoke_mind)
+        revoked = chain.revoke(principal=principals[mind_id], model=minds[mind_id].mind.model)
+        events.append({"tick": tick, "event": "operator revoked on chain", "mind": mind_id, "tx": revoked["txs"][0]})
+        ledger.revoke(mind_id, tick)
+        return
+    if tick == 0 or tick % max(1, int(config.permission_check_every)) != 0:
+        return
+    for mind_id, bound in enumerate(minds):
+        if mind_id in ledger.revoked:
+            continue
+        if not chain.permitted(principal=principals[mind_id], model=bound.mind.model):
+            events.append({"tick": tick, "event": "chain permission found revoked", "mind": mind_id})
+            ledger.revoke(mind_id, tick)
+
+
+def _settle(
+    minds: Sequence[BoundMind],
+    config: MindsRunConfig,
+    ledger: Ledger,
+    principals: dict[int, str],
+    admissions: dict[int, dict[str, Any]],
+    events: list[dict[str, Any]],
+    replay: Replay,
+    receipts_jsonl: bytes,
+    run_id: str,
+) -> dict[str, Any]:
+    """Settle every mind on chain (one at a time): debit what it spent, record usage bound to the recording."""
+
+    chain = config.nunchi
+    replay_sha = sha256_hex(encode_replay_payload(replay))
+    receipts_sha = sha256_hex(receipts_jsonl)
+
+    def settle_one(mind_id: int) -> tuple[int, dict[str, Any]]:
+        account = ledger.accounts[mind_id]
+        receipt = settlement_receipt(replay_sha256=replay_sha, receipts_sha256=receipts_sha, principal=principals[mind_id])
+        cost_usd_micros = int(math.ceil(account.tokens * float(minds[mind_id].usd_per_mtok)))
+        settled = chain.settle(
+            principal=principals[mind_id], model=minds[mind_id].mind.model, spent=int(account.spent),
+            cost_usd_micros=cost_usd_micros, receipt=receipt,
+        )
+        return mind_id, settled
+
+    settled = dict(settle_one(mind_id) for mind_id in range(len(minds)))
+    return {
+        "chain_rpc": chain.rpc,
+        "run_id": run_id,
+        "replay_sha256": replay_sha,
+        "receipts_sha256": receipts_sha,
+        "events": events,
+        "minds": [
+            {"mind": mind_id, "principal": principals[mind_id], "admission": admissions[mind_id], "settlement": settled[mind_id]}
+            for mind_id in range(len(minds))
+        ],
+    }
