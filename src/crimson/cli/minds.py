@@ -431,7 +431,7 @@ def cmd_minds_grid(
     meters: bool = typer.Option(True, "--meters/--no-meters", help="metering strip + enemies tinted by mind (runs with run.minds.json)"),
     title: str = typer.Option("", "--title", help="title card text (3 s before the grid)"),
     subtitle: str = typer.Option("", "--subtitle", help="title card subtitle"),
-    end_card: bool = typer.Option(True, "--end-card/--no-end-card", help="settlement card after the grid (runs settled on Nunchi; audits them on chain)"),
+    end_card: bool = typer.Option(True, "--end-card/--no-end-card", help="AI bill card after the grid (runs settled on Nunchi)"),
     base_dir: Path = _BASE_DIR,
 ) -> None:
     """Render two or four replays as one labelled video: side by side, or a 2x2 grid, through ffmpeg."""
@@ -530,18 +530,9 @@ def cmd_minds_grid(
         if end_card and len(settled) == len(replays) and all(
             json.loads((d / "run.minds.json").read_text(encoding="utf-8")).get("settlement") for d in settled
         ):
-            from ..minds.audit import audit_run
             from ..minds.cards import end_card as draw_end_card
 
-            blocks: list[tuple[Path, str, tuple[int, int] | None]] = []
-            for run_dir, name in zip(settled, names, strict=True):
-                try:
-                    checks = audit_run(run_dir)
-                    audit: tuple[int, int] | None = (sum(passed for _, passed, _ in checks), len(checks))
-                except Exception as exc:  # noqa: BLE001 - the card says the audit could not run instead
-                    typer.echo(f"audit of {run_dir} failed: {exc}", err=True)
-                    audit = None
-                blocks.append((run_dir, name, audit))
+            blocks = list(zip(settled, names, strict=True))
             card = Path(tmp) / "end.png"
             draw_end_card(card, width=grid_w, height=grid_h, tiles=blocks)
             parts.append((card, 7.0))

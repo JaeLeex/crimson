@@ -52,11 +52,10 @@ def title_card(path: Path, *, width: int, height: int, title: str, subtitle: str
         y += int(mid.size * 1.35)
     y += 40
     legend = [
-        (MIND_BYTES[0], "orange enemy = steered by AI mind 0"),
-        (MIND_BYTES[1], "cyan enemy = steered by AI mind 1"),
-        ((170, 170, 170), "normal colour = the game's own AI (no mind, or its mind was cut off)"),
-        ((90, 210, 90), "bars = credits left on each mind's Nunchi chain budget; red past the cap = overdraft"),
-        ((255, 255, 255), "ticker = every AI call as it happens: model, tokens, latency, credits, dollars"),
+        (MIND_BYTES[0], "orange: enemy steered by AI mind 0"),
+        (MIND_BYTES[1], "cyan: enemy steered by AI mind 1"),
+        ((170, 170, 170), "normal colour: the game's own AI"),
+        ((90, 210, 90), "bars: credits left in each mind's budget"),
     ]
     for colour, label in legend:
         draw.rectangle((60, y + 4, 60 + small.size, y + 4 + small.size), fill=colour)
@@ -66,65 +65,102 @@ def title_card(path: Path, *, width: int, height: int, title: str, subtitle: str
     image.save(path)
 
 
-def _block_lines(run_dir: Path, name: str, audit: tuple[int, int] | None) -> list[tuple[str, tuple[int, int, int], bool]]:
-    """(text, colour, bold) lines summarising one run's settlement."""
+class _Row:
+    def __init__(self, label: str, calls: int, tokens: int, usd: float | None, credits: int, colour: tuple[int, int, int], bold: bool = False) -> None:
+        self.label, self.calls, self.tokens, self.usd, self.credits, self.colour, self.bold = label, calls, tokens, usd, credits, colour, bold
+
+
+def _money(usd: float | None) -> str:
+    return "$0" if usd is None or usd == 0 else f"${usd:.4f}"
+
+
+def _bill(run_dir: Path) -> tuple[list[_Row], list[tuple[str, tuple[int, int, int]]]]:
+    """The bill's rows (one per mind, then the total) and the lines under it (price, what the chain did)."""
 
     meta = json.loads((run_dir / "run.minds.json").read_text(encoding="utf-8"))
     settlement = meta.get("settlement") or {}
-    lines: list[tuple[str, tuple[int, int, int], bool]] = [(name, (255, 255, 255), True)]
-    tokens = 0
-    usd_micros = 0
+    rows: list[_Row] = []
+    notes: list[tuple[str, tuple[int, int, int]]] = []
+    issued = 0
+    billed = 0
+    refused = False
+    blocks: list[str] = []
+    prices: dict[str, float] = {}
+    self_hosted = False
     for entry in settlement.get("minds", []):
         mind_id = int(entry["mind"])
         lease = json.loads((run_dir / entry["admission"]["lease_file"]).read_text(encoding="utf-8"))
+        account = next(a for a in meta.get("accounts", []) if int(a["mind_id"]) == mind_id)
         model = model_label(str(lease.get("model", "")))
+        usd_per_mtok = float(lease.get("usd_per_mtok", 0.0))
+        tokens = int(account.get("tokens", 0))
+        usd = tokens * usd_per_mtok / 1_000_000 if usd_per_mtok else None
+        self_hosted = self_hosted or not usd_per_mtok
+        prices[model] = usd_per_mtok
+        rows.append(_Row(f"mind {mind_id} ({model})", int(account.get("inferences", 0)), tokens, usd, int(account.get("spent", 0)), MIND_BYTES[mind_id % len(MIND_BYTES)]))
         settled = entry["settlement"]
-        colour = MIND_BYTES[mind_id % len(MIND_BYTES)]
-        debit = next((tx for tx in settled["txs"] if tx.get("op") == "debit"), {})
-        if settled["settled"]:
-            block = str(debit.get("status", "")).replace("finalized:", "")
-            lines.append((f"m{mind_id} {model}: chain debited {int(settled['spent']):,} cr (block {block})", colour, False))
-            lines.append((f"   {int(settled['balance_before']):,} -> {int(settled['balance_after']):,} cr left · tx {str(debit.get('tx', ''))[:10]}", (190, 195, 205), False))
+        issued += int(settled["balance_before"])
+        billed += int(settled["spent"])
+        refused = refused or not settled["settled"]
+        debit = next((tx for tx in settled["txs"] if tx.get("op") == "debit" and tx.get("status")), None)
+        if debit:
+            blocks.append(str(debit["status"]).replace("finalized:", ""))
+    total_usd = sum(row.usd or 0.0 for row in rows)
+    rows.append(_Row("Total", sum(r.calls for r in rows), sum(r.tokens for r in rows), total_usd if not self_hosted else None, billed, (255, 255, 255), bold=True))
+    for model, usd_per_mtok in prices.items():
+        if usd_per_mtok:
+            notes.append((f"{model}: ${usd_per_mtok:g} per million tokens", (190, 195, 205)))
         else:
-            lines.append((f"m{mind_id} {model}: chain REFUSED {int(settled['spent']):,} cr", (255, 90, 80), False))
-            lines.append((f"   only {int(lease.get('budget_credits', 0)):,} issued · balance kept at {int(settled['balance_after']):,}", (190, 195, 205), False))
-        usd_micros += int(settled.get("usage_cost_usd_micros_total", 0))
-    for account in meta.get("accounts", []):
-        tokens += int(account.get("tokens", 0))
+            notes.append((f"{model}: runs on our own machine, no API charge", (190, 195, 205)))
     for event in settlement.get("events", []):
-        block = str(event.get("tx", {}).get("status", "")).replace("finalized:", "")
-        lines.append((f"m{event['mind']} revoked on chain at {int(event['tick']) / 60:.0f} s (block {block})", (255, 120, 120), False))
-    cost = f"${usd_micros / 1_000_000:.4f}" if usd_micros else "$0 API (self-hosted)"
-    lines.append((f"AI metered: {tokens:,} tokens · {cost}", (255, 225, 120), False))
-    if audit is not None:
-        passed, total = audit
-        lines.append((f"audit on chain: {passed}/{total} checks pass", (120, 230, 120) if passed == total else (255, 90, 80), True))
-    return lines
+        notes.append((f"mind {event['mind']} cut off on chain at 0:{int(event['tick']) // 60:02d}", (255, 120, 120)))
+    if refused:
+        notes.append((f"Nunchi refused the bill: {billed:,} credits against {issued:,} issued. Nothing was charged.", (255, 90, 80)))
+    else:
+        where = f" (block {blocks[-1]})" if blocks else ""
+        notes.append((f"Nunchi charged {billed:,} of {issued:,} credits{where}.", (120, 230, 120)))
+    return rows, notes
 
 
-def end_card(path: Path, *, width: int, height: int, tiles: list[tuple[Path, str, tuple[int, int] | None]]) -> None:
-    """One block per tile, in the same layout as the grid (2 side by side, or 2x2)."""
+def end_card(path: Path, *, width: int, height: int, tiles: list[tuple[Path, str]]) -> None:
+    """One itemised AI bill per game, in the same layout as the grid (2 side by side, or 2x2)."""
 
     from PIL import Image, ImageDraw
 
     image = Image.new("RGB", (width, height), _BG)
     draw = ImageDraw.Draw(image)
     columns = 2
-    rows = 1 if len(tiles) == 2 else 2
-    cell_w, cell_h = width // columns, height // rows
-    head, body = _font(_BOLD, max(20, cell_w // 22)), _font(_REGULAR, max(15, cell_w // 32))
-    for index, (run_dir, name, audit) in enumerate(tiles):
-        x0, y0 = (index % columns) * cell_w + 24, (index // columns) * cell_h + 28
-        y = y0
-        for text, colour, bold in _block_lines(run_dir, name, audit):
-            font = head if bold else body
-            for line in _wrap(draw, text, font, cell_w - 48):
-                draw.text((x0, y), line, fill=colour, font=font)
-                y += int(font.size * 1.35)
-            if bold and y == y0 + int(head.size * 1.35):
-                y += 6
+    rows_n = 1 if len(tiles) == 2 else 2
+    cell_w, cell_h = width // columns, height // rows_n
+    head = _font(_BOLD, max(20, cell_w // 22))
+    body = _font(_REGULAR, max(14, cell_w // 34))
+    bold = _font(_BOLD, max(14, cell_w // 34))
+    for index, (run_dir, name) in enumerate(tiles):
+        x0, y = (index % columns) * cell_w + 24, (index // columns) * cell_h + 28
+        draw.text((x0, y), f"AI bill: {name}", fill=(255, 255, 255), font=head)
+        y += int(head.size * 1.6)
+        bill_rows, notes = _bill(run_dir)
+        # Columns: item, calls, tokens, cost, credits (right-aligned numbers).
+        right = [x0 + int(cell_w * f) for f in (0.50, 0.66, 0.80, 0.93)]
+        headers = ("calls", "tokens", "cost", "credits")
+        for x, label in zip(right, headers, strict=True):
+            draw.text((x - draw.textlength(label, font=body), y), label, fill=(150, 155, 165), font=body)
+        y += int(body.size * 1.5)
+        for row in bill_rows:
+            font = bold if row.bold else body
+            if row.bold:
+                draw.line((x0, y - 4, x0 + int(cell_w * 0.93) - 0, y - 4), fill=(80, 84, 92), width=1)
+            draw.text((x0, y), row.label, fill=row.colour, font=font)
+            for x, value in zip(right, (f"{row.calls:,}", f"{row.tokens:,}", _money(row.usd), f"{row.credits:,}"), strict=True):
+                draw.text((x - draw.textlength(value, font=font), y), value, fill=row.colour, font=font)
+            y += int(font.size * 1.5)
+        y += 10
+        for text, colour in notes:
+            for line in _wrap(draw, text, body, cell_w - 48):
+                draw.text((x0, y), line, fill=colour, font=body)
+                y += int(body.size * 1.4)
         if index % columns == 0:
-            draw.line(((index % columns + 1) * cell_w, (index // columns) * cell_h + 16, (index % columns + 1) * cell_w, (index // columns + 1) * cell_h - 16), fill=(60, 64, 72), width=2)
-    if rows == 2:
+            draw.line((cell_w, (index // columns) * cell_h + 16, cell_w, (index // columns + 1) * cell_h - 16), fill=(60, 64, 72), width=2)
+    if rows_n == 2:
         draw.line((16, cell_h, width - 16, cell_h), fill=(60, 64, 72), width=2)
     image.save(path)

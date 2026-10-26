@@ -436,7 +436,7 @@ def test_the_meter_timeline_tracks_spend_caps_overdrafts_and_revocations(tmp_pat
     assert track.state(60)[0] == "BUDGET CAP"
     assert track.state(90)[0] == "REVOKED ON CHAIN"
     assert [call.number for call in timeline.recent_calls(45, 2)] == [3, 2]
-    assert timeline.event(70) == "mind 0 hit its budget cap - native AI takes over"
+    assert timeline.event(70) == "mind 0 hit its budget cap, game AI takes over"
 
     ungoverned = tmp_path / "ungoverned"
     ungoverned.mkdir()

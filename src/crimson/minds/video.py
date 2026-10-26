@@ -157,14 +157,14 @@ class MeterTimeline:
                     continue
                 if row["kind"] == "refusal" and row.get("detail") == "budget_exhausted" and track.cap_tick is None:
                     track.cap_tick = int(row["tick"])
-                    events.append((track.cap_tick, f"mind {mind_id} hit its budget cap - native AI takes over"))
+                    events.append((track.cap_tick, f"mind {mind_id} hit its budget cap, game AI takes over"))
                 if row["kind"] == "revocation" and track.revoke_tick is None:
                     track.revoke_tick = int(row["tick"])
                     events.append((track.revoke_tick, f"operator revoked mind {mind_id} on chain"))
             if not track.governed and track.calls:
                 over = next((call for call in track.calls if sum(c.cost for c in track.calls if c.number <= call.number) > budget), None)
                 if over is not None:
-                    events.append((over.tick, f"mind {mind_id} passed its {budget} cr cap - nothing stops it"))
+                    events.append((over.tick, f"mind {mind_id} passed its {budget} cr cap"))
             track.finish()
             tracks.append(track)
         events.sort()
@@ -261,8 +261,9 @@ def make_callbacks(
             return measure_small_text_width(font, shown)
 
         free = timeline.tracks and all(track.usd_per_mtok == 0 for track in timeline.tracks)
-        cost = "$0 API (self-hosted)" if free else _usd(timeline.total_usd(tick))
-        text(f"AI cost {cost} - {timeline.total_tokens(tick):,} tokens", 8, top + 2, (255, 255, 255), limit=width - 16)
+        cost = "$0 (self-hosted)" if free else _usd(timeline.total_usd(tick))
+        credits = sum(track.spent(tick) for track in timeline.tracks)
+        text(f"AI bill so far: {cost} | {timeline.total_tokens(tick):,} tokens | {credits:,} cr", 8, top + 2, (255, 255, 255), limit=width - 16)
 
         y = top + 20
         for track in timeline.tracks:

@@ -256,12 +256,13 @@ ledger now reserves the dearest call seen before asking a governed mind again.
   creature draw uses for those slots, and the simulation's own `CreatureState.tint` (read by fire damage and
   corpse decals) is never touched. Who is steering comes from the recorded commands (`steer_schedule`), because
   the session's `steer_holds` holds only what carries into the next tick.
-- **The metering strip** along the bottom of each tile: the run's AI cost so far (dollars at the model's
-  published price, or "$0 API (self-hosted)"); one bar per mind of credits left on its chain budget, with
+- **The metering strip** along the bottom of each tile: the AI bill so far (dollars at the model's published
+  price, or "$0 (self-hosted)", tokens and credits); one bar per mind of credits left on its chain budget, with
   ACTIVE / BUDGET CAP / REVOKED ON CHAIN / OVER CAP +N, and a red overdraft bar for an ungoverned mind past its
   cap; the latest model calls (model, call number, tokens, latency, credits, dollars); the latest event.
 - **Cards.** `--title`/`--subtitle` put a 4 s title card with the colour legend first; for runs settled on
-  Nunchi a 7 s end card follows with each mind's on-chain debit (block, transaction) or the chain's refusal,
-  revocations, the AI metered, and the audit result, which `audit_run` computes against the chain at render time.
+  Nunchi a 7 s end card follows with each game's AI bill: per mind the model calls, tokens, dollars at the
+  model's published price and credits, the total, the price used, any on-chain cut-off, and whether Nunchi
+  charged the credits (with the block) or refused the bill. `crimson minds audit` stays a separate command.
 
 `run_replay_render_video` takes the two hooks this uses, `before_draw` and `on_frame`; both default to none.
