@@ -183,7 +183,7 @@ def compose_build_story(
 
     def live_frame(side: int, builds: Builds) -> Image.Image | None:
         index = max(i for i, (start, _, _) in enumerate(builds.live) if start <= frame)
-        start, path, offset = builds.live[index]
+        _, path, offset = builds.live[index]
         if index not in live_decoders:
             for old in live_decoders.values():
                 old.kill()
