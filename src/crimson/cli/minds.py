@@ -887,7 +887,9 @@ def cmd_minds_build_clip(
     import shutil
     import tempfile
 
-    from ..minds.build_clip import Builds, compose_build_story, schedule
+    from ..minds.arena import arena_quest
+    from ..minds.build import playtest_quest
+    from ..minds.build_clip import Builds, clip_frames, compose_build_story, schedule
     from ..replay.codec import load_replay_file
     from ..replay.driver.replay_render import ReplayRenderError, run_replay_render_video
 
@@ -900,26 +902,46 @@ def cmd_minds_build_clip(
         typer.echo("give two panel names separated by ';'", err=True)
         raise typer.Exit(code=2)
     builds = [Builds.load(left_dir), Builds.load(right_dir)]
+    total, _ = clip_frames(builds[0])
+
+    def render(replay_path: Path, video: Path, ticks: int) -> None:
+        typer.echo(f"rendering {replay_path.name} -> {video.name}", err=True)
+        try:
+            run_replay_render_video(
+                load_replay_file(replay_path), replay_path=replay_path, output_path=video, base_dir=base_dir,
+                assets_dir=assets_dir, width=tile, height=tile, max_ticks=ticks, preset="veryfast", overwrite=True,
+            )
+        except ReplayRenderError as exc:
+            typer.echo(f"render failed: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+
     with tempfile.TemporaryDirectory(prefix="crimson-build-clip-") as tmp:
+        # The enforced panel shows the live game: the minds ring arena until a proposal is accepted, then that quest.
+        left = builds[0]
+        slots = schedule(left, intro_frames=480, step_frames=75, total=total)
+        changes = [(0, None)] + [(slot.start, slot.attempt) for slot in slots if slot.attempt is not None and slot.attempt.verdict == "accepted"]
+        for number, (start, attempt) in enumerate(changes):
+            end = changes[number + 1][0] if number + 1 < len(changes) else total
+            video = Path(tmp) / f"live-{number}.mp4"
+            if attempt is None:
+                stem = Path(tmp) / "baseline"
+                stem.mkdir()
+                test = playtest_quest(arena_quest("ring"), seed=1, max_seconds=60, out_dir=stem, stem="ring")
+                render(stem / test.replay_file, video, end + 10)
+                left.live.append((0, video, 0))
+            else:
+                render(left.path / "playtests" / attempt.playtests[0].replay_file, video, 480 + (end - start) + 10)
+                left.live.append((start, video, 480))
         for side, build in enumerate(builds):
+            if build.live:
+                continue
             # Render only the playtests the clip will show, up to the end of their excerpt.
             for slot in schedule(build, intro_frames=480, step_frames=75, total=10**6)[:16]:
                 attempt = slot.attempt
                 if attempt is None or not attempt.playtests:
                     continue
-                proof = attempt.playtests[0]
-                replay_path = build.path / "playtests" / proof.replay_file
                 video = Path(tmp) / f"side{side}-attempt{attempt.attempt + 1:02d}.mp4"
-                typer.echo(f"rendering {replay_path.name} ({'left' if side == 0 else 'right'})", err=True)
-                try:
-                    run_replay_render_video(
-                        load_replay_file(replay_path), replay_path=replay_path, output_path=video, base_dir=base_dir,
-                        assets_dir=assets_dir, width=tile, height=tile, max_ticks=slot.excerpt_from + slot.frames + 10,
-                        preset="veryfast", overwrite=True,
-                    )
-                except ReplayRenderError as exc:
-                    typer.echo(f"render failed: {exc}", err=True)
-                    raise typer.Exit(code=1) from exc
+                render(build.path / "playtests" / attempt.playtests[0].replay_file, video, slot.excerpt_from + slot.frames + 10)
                 build.excerpts[attempt.attempt] = video
         out.parent.mkdir(parents=True, exist_ok=True)
         moments = compose_build_story(builds[0], builds[1], out, ffmpeg=ffmpeg, title=title, corner=corner, names=labels, tile=tile)

@@ -1,5 +1,8 @@
 """The builders clip: two builders with the same model and brief, one under its lease and one not, side by side.
 
+The enforced panel shows the live game throughout: a starting level until a proposal is accepted, then that quest.
+Its refusals appear as a banner over the game, which keeps playing; the unenforced panel plays each proposal.
+
 The first proposal is shown at length: in the two pressure runs (`crimson minds build --goal ...`, same seed) it is
 the same proposal on both sides, so the left refuses it before it runs and the right plays it. The rest follow as a
 ticker, one proposal per `step_s`: a refused proposal shows a card, a proposal that ran shows an excerpt of its
@@ -41,6 +44,9 @@ class Builds:
     allowance: int
     # Excerpt videos of the playtests, by attempt index (rendered by the CLI).
     excerpts: dict[int, Path] = field(default_factory=dict)
+    # When set, the panel shows the live game instead of each proposal: (from clip frame, video, from video frame),
+    # starting on the baseline level and switching to each accepted quest. Refusals then appear as a banner over it.
+    live: list[tuple[int, Path, int]] = field(default_factory=list)
 
     @classmethod
     def load(cls, path: Path) -> Builds:
@@ -104,6 +110,14 @@ def schedule(builds: Builds, *, intro_frames: int, step_frames: int, total: int)
     return slots
 
 
+def clip_frames(left: Builds, *, intro_frames: int = 480, step_frames: int = 75, hold_frames: int = 300) -> tuple[int, int]:
+    """(total frames, the frame the left's budget cap shows): the ticker runs to the cap, then holds."""
+
+    cap_index = next((i for i, a in enumerate(left.attempts) if a.verdict == "refused_budget"), len(left.attempts))
+    cap_frame = intro_frames + (cap_index - 1) * step_frames
+    return cap_frame + hold_frames, cap_frame
+
+
 def compose_build_story(
     left: Builds,
     right: Builds,
@@ -122,9 +136,7 @@ def compose_build_story(
 
     intro_frames = int(intro_s * 60)
     step_frames = int(step_s * 60)
-    cap_index = next((i for i, a in enumerate(left.attempts) if a.verdict == "refused_budget"), len(left.attempts))
-    cap_frame = intro_frames + (cap_index - 1) * step_frames
-    total = cap_frame + int(hold_s * 60)
+    total, cap_frame = clip_frames(left, intro_frames=intro_frames, step_frames=step_frames, hold_frames=int(hold_s * 60))
     plans = [schedule(builds, intro_frames=intro_frames, step_frames=step_frames, total=total) for builds in (left, right)]
 
     title_h, meter_h, caption_h = 72, 248, 96
@@ -167,6 +179,26 @@ def compose_build_story(
             last_frame[side] = Image.frombytes("RGB", (tile, tile), raw)
         return last_frame[side]
 
+    live_decoders: dict[int, subprocess.Popen[bytes]] = {}
+
+    def live_frame(side: int, builds: Builds) -> Image.Image | None:
+        index = max(i for i, (start, _, _) in enumerate(builds.live) if start <= frame)
+        start, path, offset = builds.live[index]
+        if index not in live_decoders:
+            for old in live_decoders.values():
+                old.kill()
+            live_decoders.clear()
+            live_decoders[index] = subprocess.Popen(
+                [ffmpeg, "-loglevel", "error", "-i", str(path), "-vf", f"select=gte(n\\,{offset}),scale={tile}:{tile}",
+                 "-vsync", "0", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                stdout=subprocess.PIPE,
+            )
+        stream = live_decoders[index].stdout
+        raw = stream.read(tile * tile * 3) if stream is not None else b""
+        if len(raw) == tile * tile * 3:
+            last_frame[side] = Image.frombytes("RGB", (tile, tile), raw)
+        return last_frame[side]
+
     encoder = subprocess.Popen(
         [ffmpeg, "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{width}x{height}", "-r", "60", "-i", "-",
          "-c:v", "libx264", "-preset", "medium", "-crf", "17", "-pix_fmt", "yuv420p", "-an", str(out)],
@@ -196,7 +228,30 @@ def compose_build_story(
 
                 # The game area: a refused card, the budget-cap card, or the playtest excerpt.
                 area = (x0, title_h, x0 + tile, title_h + tile)
-                if stopped:
+                if builds.live:
+                    image = live_frame(side, builds)
+                    if image is not None:
+                        canvas.paste(image, (x0, title_h))
+                    if stopped:
+                        lines = [("Budget cap reached: no more proposals", _AMBER, tag_font),
+                                 ("The game continues on the last accepted level.", _WHITE, small)]
+                    elif attempt.verdict == "refused_policy":
+                        lines = [(f"Proposal #{attempt.attempt + 1} refused before it ran", _AMBER, tag_font)]
+                        lines += [("· " + violation_text(v), _WHITE, small) for v in attempt.violations[:2]]
+                    elif attempt.verdict == "accepted":
+                        lines = [(f"Proposal #{attempt.attempt + 1} passed its playtest: now live", _GREEN, tag_font)]
+                    elif attempt.verdict in ("rejected", "invalid"):
+                        lines = [(f"Proposal #{attempt.attempt + 1} playtested: {attempt.detail.split(':')[0]}, not accepted", _GREY, tag_font)]
+                    else:
+                        lines = [(f"Proposal #{attempt.attempt + 1}: {attempt.detail}", _GREY, tag_font)]
+                    level = "Live game: " + ("starting level" if not accepted else f"level from proposal #{max(a.attempt for a in done if a.verdict == 'accepted') + 1}")
+                    height_tag = 34 + 24 * len(lines)
+                    top = title_h + tile - height_tag
+                    glow.rectangle((x0, top, x0 + tile, title_h + tile), fill=(10, 11, 14, 210))
+                    glow.text((x0 + 16, top + 6), level, fill=(*_DIM, 255), font=small)
+                    for row, (text, colour, font) in enumerate(lines):
+                        glow.text((x0 + 16, top + 30 + 24 * row), text, fill=(*colour, 255), font=font)
+                elif stopped:
                     draw.rectangle(area, fill=_CARD)
                     draw.text((x0 + 32, title_h + 170), "Budget cap reached", fill=_AMBER, font=card_big)
                     draw.text((x0 + 32, title_h + 214), "No more model calls.", fill=_WHITE, font=card_body)
@@ -264,7 +319,7 @@ def compose_build_story(
             elif frame >= intro_frames:
                 draw.rectangle((24, caption_top + 16, 29, caption_top + 74), fill=_AMBER)
                 draw.text((44, caption_top + 18), "Every proposal is metered and checked.", fill=_WHITE, font=caption_font)
-                draw.text((44, caption_top + 46), "Left refuses rule-breaking levels. Right runs them.", fill=_WHITE, font=caption_font)
+                draw.text((44, caption_top + 46), "Left: refused levels never reach the game. Right: they run.", fill=_WHITE, font=caption_font)
             else:
                 draw.rectangle((24, caption_top + 16, 29, caption_top + 74), fill=_AMBER)
                 draw.text((44, caption_top + 18), "Same AI, same proposed level: nests and spider bosses.", fill=_WHITE, font=caption_font)
@@ -274,6 +329,6 @@ def compose_build_story(
     finally:
         encoder.stdin.close()
         encoder.wait()
-        for decoder in decoders.values():
+        for decoder in [*decoders.values(), *live_decoders.values()]:
             decoder.kill()
     return {"frames": total, "cap_frame": cap_frame, "right_shown": max(s.attempt.attempt for s in plans[1] if s.attempt) + 1}

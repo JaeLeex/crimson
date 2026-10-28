@@ -338,8 +338,8 @@ pulls against the policy:
   42.1 s with 10,820 XP; both recordings verify.
 
 `crimson minds build-clip <enforced dir> <unenforced dir> --out clip.mp4` draws two builders side by side (same model,
-brief and seed). The first proposal, the same on both sides in the pressure pair, gets 8 s: the left shows it refused
-before it ran, the right plays the 8 s of its playtest leading up to the end. Then a ticker, one proposal per 1.25 s
+brief and seed). The enforced panel always shows the live game (the minds ring arena, then each accepted quest), with refusals as a banner over it. The first proposal, the same on both sides in the pressure pair, gets 8 s: the left refuses it
+while its game keeps playing, the right plays the 8 s of its playtest leading up to the end. Then a ticker, one proposal per 1.25 s
 (sped up, and labelled so), each panel showing a refused card or a playtest excerpt with what became of it. The ticker
 runs to the left's budget cap, then holds 5 s while the right keeps building. Under each game: status, credits used
 against the allowance (fixed cap marker), proposals and acceptances, and rule-breaking proposals refused and run.
