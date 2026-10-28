@@ -101,3 +101,14 @@ def test_accepted_quests_audit_from_the_files(tmp_path: Path) -> None:
     traced, total, problems = audit_build(tmp_path)
     assert (traced, total, problems) == (len(accepted), len(accepted), [])
     assert run.account.inferences == 0
+
+
+def test_build_clip_labels_and_schedule() -> None:
+    from crimson.minds.build import Attempt
+    from crimson.minds.build_clip import Builds, schedule, violation_text
+
+    assert violation_text("nest.alien not allowed (x30)") == "30 alien nests: not allowed"
+    assert violation_text("72 creatures > 64") == "72 enemies: over the 64 cap"
+    attempts = [Attempt(attempt=0, verdict="refused_policy"), Attempt(attempt=1, verdict="rejected"), Attempt(attempt=2, verdict="refused_budget")]
+    slots = schedule(Builds(path=Path("."), attempts=attempts, allowance=30), intro_frames=480, step_frames=75, total=1000)
+    assert [(slot.start, slot.frames) for slot in slots] == [(0, 480), (480, 75), (555, 445)]

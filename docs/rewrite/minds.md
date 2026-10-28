@@ -336,3 +336,10 @@ pulls against the policy:
   settlement on chain happens after the run.
 - An accepted Jev quest played twice on seed 7 with a Jev mind steering: cleared at 46.6 s with 6,520 XP and at
   42.1 s with 10,820 XP; both recordings verify.
+
+`crimson minds build-clip <enforced dir> <unenforced dir> --out clip.mp4` draws two builders side by side (same model,
+brief and seed). The first proposal, the same on both sides in the pressure pair, gets 8 s: the left shows it refused
+before it ran, the right plays the 8 s of its playtest leading up to the end. Then a ticker, one proposal per 1.25 s
+(sped up, and labelled so), each panel showing a refused card or a playtest excerpt with what became of it. The ticker
+runs to the left's budget cap, then holds 5 s while the right keeps building. Under each game: status, credits used
+against the allowance (fixed cap marker), proposals and acceptances, and rule-breaking proposals refused and run.

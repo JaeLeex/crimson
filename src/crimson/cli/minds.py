@@ -869,3 +869,59 @@ def cmd_minds_build_report(
     typer.echo(table)
     if out is not None:
         out.write_text(table + "\n", encoding="utf-8")
+
+
+@minds_app.command("build-clip")
+def cmd_minds_build_clip(
+    left_dir: Path = typer.Argument(..., help="the enforced build directory"),
+    right_dir: Path = typer.Argument(..., help="the unenforced build directory (same builder, brief and seed)"),
+    out: Path = typer.Option(..., "--out", help="output .mp4"),
+    title: str = typer.Option("An AI builds levels. The lease sets the rules.", "--title"),
+    corner: str = typer.Option("Recorded runs · sped up", "--corner"),
+    names: str = typer.Option("Lease enforced;Lease not enforced", "--names", help="the two panel names, separated by ';'"),
+    tile: int = typer.Option(512, "--tile"),
+    assets_dir: Path = typer.Option(Path("artifacts/assets"), "--assets-dir"),
+    base_dir: Path = _BASE_DIR,
+) -> None:
+    """Two builders side by side: the first proposal at length, then a ticker to the left's budget cap."""
+    import shutil
+    import tempfile
+
+    from ..minds.build_clip import Builds, compose_build_story, schedule
+    from ..replay.codec import load_replay_file
+    from ..replay.driver.replay_render import ReplayRenderError, run_replay_render_video
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        typer.echo("ffmpeg not found on PATH", err=True)
+        raise typer.Exit(code=1)
+    labels = tuple(part.strip() for part in names.split(";"))
+    if len(labels) != 2:
+        typer.echo("give two panel names separated by ';'", err=True)
+        raise typer.Exit(code=2)
+    builds = [Builds.load(left_dir), Builds.load(right_dir)]
+    with tempfile.TemporaryDirectory(prefix="crimson-build-clip-") as tmp:
+        for side, build in enumerate(builds):
+            # Render only the playtests the clip will show, up to the end of their excerpt.
+            for slot in schedule(build, intro_frames=480, step_frames=75, total=10**6)[:16]:
+                attempt = slot.attempt
+                if attempt is None or not attempt.playtests:
+                    continue
+                proof = attempt.playtests[0]
+                replay_path = build.path / "playtests" / proof.replay_file
+                video = Path(tmp) / f"side{side}-attempt{attempt.attempt + 1:02d}.mp4"
+                typer.echo(f"rendering {replay_path.name} ({'left' if side == 0 else 'right'})", err=True)
+                try:
+                    run_replay_render_video(
+                        load_replay_file(replay_path), replay_path=replay_path, output_path=video, base_dir=base_dir,
+                        assets_dir=assets_dir, width=tile, height=tile, max_ticks=slot.excerpt_from + slot.frames + 10,
+                        preset="veryfast", overwrite=True,
+                    )
+                except ReplayRenderError as exc:
+                    typer.echo(f"render failed: {exc}", err=True)
+                    raise typer.Exit(code=1) from exc
+                build.excerpts[attempt.attempt] = video
+        out.parent.mkdir(parents=True, exist_ok=True)
+        moments = compose_build_story(builds[0], builds[1], out, ffmpeg=ffmpeg, title=title, corner=corner, names=labels, tile=tile)
+    typer.echo(" · ".join(f"{key} {value}" for key, value in moments.items()), err=True)
+    typer.echo(f"wrote {out}")
