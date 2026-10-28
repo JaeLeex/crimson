@@ -19,6 +19,7 @@ import os
 import random
 import urllib.error
 import urllib.request
+from collections.abc import Iterable
 from typing import Any
 
 import msgspec
@@ -60,10 +61,15 @@ class JevExchange(msgspec.Struct, frozen=True):
     error: str = ""
 
 
-def sample_move(probabilities: dict[str, float], *, temperature: float, rng: random.Random) -> str:
-    """A move drawn from Jev's odds: the most likely at temperature 0, the odds as given at 1, flatter above."""
+def sample_move(
+    probabilities: dict[str, float], *, temperature: float, rng: random.Random, vocabulary: Iterable[str] = JEV_MOVES,
+) -> str:
+    """A move drawn from Jev's odds: the most likely at temperature 0, the odds as given at 1, flatter above.
 
-    options = [move for move in JEV_MOVES if move in probabilities]
+    `vocabulary` fixes the option order (ties and draws follow it); the steering moves by default.
+    """
+
+    options = [move for move in vocabulary if move in probabilities]
     if not options:
         raise ValueError("no known move in the answer")
     if temperature <= 0.0:

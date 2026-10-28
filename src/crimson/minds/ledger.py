@@ -21,6 +21,7 @@ class Receipt(msgspec.Struct, frozen=True):
     mind_id: int
     # "inference": a charged decision; "refusal": a steer or inference the policy refused;
     # "invalid": a steer the simulation would not accept; "steer": an accepted steer.
+    # Builders (`crimson.minds.build`) add "playtest" and "accepted".
     kind: str
     tokens: int = 0
     cost: int = 0
@@ -142,6 +143,16 @@ class Ledger:
         account.steers += 1
         self._receipt(account, tick, "steer", detail=f"slot {index} -> ({steer.target_x:.1f}, {steer.target_y:.1f})")
         return None
+
+    def note(self, mind_id: int, tick: int, kind: str, *, detail: str = "") -> None:
+        """Record an event that is not a charge (a builder's policy refusal, a playtest, an acceptance)."""
+
+        account = self.accounts[int(mind_id)]
+        if kind == "refusal":
+            account.refusals += 1
+        elif kind == "invalid":
+            account.invalid += 1
+        self._receipt(account, tick, kind, detail=detail)
 
     def summary(self) -> list[dict[str, object]]:
         return [msgspec.structs.asdict(account) for account in self.accounts.values()]

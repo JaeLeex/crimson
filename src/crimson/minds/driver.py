@@ -16,6 +16,7 @@ import msgspec
 from ..game_modes import GameMode
 from ..game_version import MINDS_RULES
 from ..math_parity import f32
+from ..quests.custom import CustomQuest
 from ..replay.codec import encode_replay_payload
 from ..replay.recorder import ReplayRecorder
 from ..replay.ticks import LiveTickSource, step_replay_tick
@@ -84,8 +85,12 @@ class MindsRunConfig:
     # Demo of the operator's stop switch: revoke `revoke_mind` on chain at this tick.
     revoke_at_tick: int | None = None
     revoke_mind: int = 0
+    # A custom quest to play instead of `scene` (for example one a builder wrote: `crimson.minds.build`).
+    quest: CustomQuest | None = None
 
     def run_spec(self) -> RunSpec:
+        if self.quest is not None:
+            return RunSpec(game_mode_id=GameMode.QUESTS, seed=int(self.seed), custom_quest=self.quest)
         match self.scene:
             case "arena" | "edge" | "ring":
                 from .arena import arena_quest

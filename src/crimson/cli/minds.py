@@ -121,6 +121,16 @@ def _build_minds(
     return bound
 
 
+def _load_quest(path: Path):
+    from ..quests.dsl import build_custom_quest
+
+    try:
+        return build_custom_quest(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        typer.echo(f"cannot load quest {path}: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+
 def _verify(run: MindsRun) -> tuple[bool, list[str]]:
     """Re-simulate the finished replay from its bytes and compare with the result it recorded."""
 
@@ -211,6 +221,7 @@ def cmd_minds_run(
     chain_budget: int = typer.Option(2000, "--chain-budget", help="credits issued on chain to a mind without a local budget"),
     revoke_at: int | None = typer.Option(None, "--revoke-at", help="demo: the operator revokes a mind on chain at this tick"),
     revoke_mind: int = typer.Option(0, "--revoke-mind"),
+    quest: Path | None = typer.Option(None, "--quest", help="play this quest recipe (.quest) instead of --scene, e.g. one a builder wrote"),
     base_dir: Path = _BASE_DIR,
 ) -> None:
     """Play one minds run headlessly, verify it, and write run.crd, receipts.jsonl and run.minds.json."""
@@ -238,7 +249,10 @@ def cmd_minds_run(
     config = MindsRunConfig(
         seed=seed, ticks=ticks, cadence=cadence, hold=hold, governed=governed, scene=scene, pilot=skill, others_limit=others,
         nunchi=_nunchi(nunchi, nunchi_rpc), settle_dir=out, chain_budget=chain_budget, revoke_at_tick=revoke_at, revoke_mind=revoke_mind,
+        quest=_load_quest(quest) if quest is not None else None,
     )
+    if quest is not None:
+        scene = f"quest:{quest.name}"
     condition = "scripted" if mind == "idle" else ("governed" if governed else "ungoverned")
     typer.echo(f"minds run: {condition} scene={scene} mind={mind} x{len(bound)} seed={seed} ticks<={ticks} cadence={cadence}", err=True)
     run = run_minds(bound, config, progress=_progress_printer(600))
@@ -774,3 +788,84 @@ def cmd_minds_clip(
         else:
             compose(panels, out, ffmpeg=ffmpeg, title=title, corner=corner, legend=legend, frames=frames, tile=tile)
     typer.echo(f"wrote {out}")
+
+
+@minds_app.command("build")
+def cmd_minds_build(
+    builder: str = typer.Option("jev", "--builder", help="jev (picks waves from the catalog), llm (writes the recipe) or scripted (no model)"),
+    attempts: int = typer.Option(20, "--attempts", help="proposals at most"),
+    target: int = typer.Option(20, "--target", help="stop once this many quests are accepted"),
+    budget: int = typer.Option(30, "--budget", help="credits the builder is issued (held to it unless --ungoverned)"),
+    price: int = typer.Option(1, "--price", help="credits per 1k tokens"),
+    ungoverned: bool = typer.Option(False, "--ungoverned", help="meter but enforce nothing: no budget cap, policy violations still run"),
+    seed: int = typer.Option(1, "--seed", help="the builder's sampling seed"),
+    temperature: float = typer.Option(1.0, "--temperature"),
+    url: str = typer.Option("http://127.0.0.1:8083", "--url", help="chat-completions server for --builder llm"),
+    model: str = typer.Option("", "--model", help="model name for --builder llm"),
+    think: bool = typer.Option(False, "--think/--no-think", help="let a thinking model reason before it writes (slow)"),
+    max_creatures: int = typer.Option(64, "--max-creatures", help="policy: creatures in the whole quest"),
+    max_seconds: int = typer.Option(30, "--max-seconds", help="policy: the last wave's time"),
+    goal: str | None = typer.Option(None, "--goal", help="the design goal in the builder's brief (default: clearable after a real fight)"),
+    out: Path | None = typer.Option(None, "--out", help="output directory (default: <base-dir>/minds/build-<timestamp>)"),
+    nunchi: bool = typer.Option(False, "--nunchi/--no-nunchi", help="admit and settle the builder on the Nunchi chain"),
+    nunchi_rpc: str = typer.Option("http://127.0.0.1:47100", "--nunchi-rpc"),
+    base_dir: Path = _BASE_DIR,
+) -> None:
+    """A builder proposes quests under a lease: policy-checked before they run, playtested, accepted with a proof replay."""
+    from ..minds.build import BuildConfig, BuildPolicy, JevBuilder, LlmBuilder, ScriptedBuilder, run_build, write_build
+
+    policy = BuildPolicy(max_creatures=max_creatures, max_seconds=max_seconds)
+    usd_per_mtok = 0.0
+    match builder:
+        case "jev":
+            chosen = JevBuilder(seed=seed, temperature=temperature)
+            usd_per_mtok = JEV_USD_PER_MTOK
+        case "llm":
+            chosen = LlmBuilder(url=url, model=model, temperature=temperature, seed=seed, think=think)
+        case "scripted":
+            chosen = ScriptedBuilder(policy, seed=seed)
+        case _:
+            typer.echo(f"unknown builder {builder!r}; use jev, llm or scripted", err=True)
+            raise typer.Exit(code=2)
+    if out is None:
+        stamp = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ")
+        out = base_dir / "minds" / f"build-{stamp}"
+    config = BuildConfig(
+        attempts=attempts, target=target, governed=not ungoverned, budget=budget, price_per_1k_tokens=price,
+        usd_per_mtok=usd_per_mtok, policy=policy, nunchi=_nunchi(nunchi, nunchi_rpc),
+        **({"goal": goal} if goal else {}),
+    )
+    condition = "ungoverned" if ungoverned else "governed"
+    typer.echo(f"minds build: {condition} builder={builder} attempts<={attempts} budget={budget} cr", err=True)
+    run = run_build(chosen, config, out, progress=lambda line: typer.echo(line, err=True))
+    write_build(run, out)
+    summary = run.summary()
+    account = run.account
+    typer.echo(
+        f"{condition} {builder}: {summary['accepted']} accepted of {summary['attempts']} attempts {summary['verdicts']} · "
+        f"{account.inferences} calls · {account.tokens:,} tokens · {account.spent} credits"
+        + (f" / {budget}" if not ungoverned else f" (allowance {budget})")
+        + f" · policy violations proposed {summary['violations_proposed']}, ran {summary['violations_executed']}",
+    )
+    if run.settlement:
+        settled = run.settlement["settlement"]
+        typer.echo(f"chain: {json.dumps({key: settled[key] for key in settled if key in ('debited', 'refused', 'balance_after', 'txs')})}")
+    typer.echo(f"wrote {out} (attempts.jsonl, receipts.jsonl, accepted.json, quests/, playtests/)")
+
+
+@minds_app.command("build-report")
+def cmd_minds_build_report(
+    build_dirs: list[Path] = typer.Argument(..., help="build directories (from `crimson minds build`)"),
+    out: Path | None = typer.Option(None, "--out", help="also write the table as markdown here"),
+) -> None:
+    """The Nunchi Worlds prototype metrics across builders: pass rate, policy, budget, audit, control overhead."""
+    from ..minds.build import report_rows
+
+    rows = report_rows(build_dirs)
+    header = ["Builder", "Attempts", "Accepted", "Pass rate (run)", "Violations proposed", "Violations ran", "Accepted in breach", "Credits / allowance", "Tokens", "Audit", "Control overhead"]
+    lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
+    lines += ["| " + " | ".join(str(row[key]) for key in header) + " |" for row in rows]
+    table = "\n".join(lines)
+    typer.echo(table)
+    if out is not None:
+        out.write_text(table + "\n", encoding="utf-8")
